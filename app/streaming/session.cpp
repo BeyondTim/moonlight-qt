@@ -1170,24 +1170,16 @@ bool Session::validateLaunch(SDL_Window* testWindow)
             m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_PYROWAVE);
         }
         else {
-            if (m_Preferences->pyroWaveCompression) {
-                if (m_Computer->pyrowaveCompressionVersion == PYROWAVE_COMPRESSION_VERSION) {
-                    m_StreamConfig.pyrowaveCompression = 1;
-                }
-                else {
-                    emitLaunchWarning(tr("Your host PC doesn't support this version of PyroWave compression. Using normal PyroWave instead."));
-                }
-            }
             const int hostLinkMbps = int(m_Computer->pyrowaveHostLinkMbps);
-            if (hostLinkMbps > 0 && m_StreamConfig.bitrate > hostLinkMbps * 800) {
-                emitLaunchWarning(tr("PyroWave is set to %1 Mbps, but the host's %2 Mbps wired link leaves room for only about %3 Mbps of video. Lower the bitrate or run calibration.")
-                                  .arg(m_StreamConfig.bitrate / 1000).arg(hostLinkMbps).arg(hostLinkMbps * 8 / 10));
+            if (hostLinkMbps > 0 && m_StreamConfig.bitrate > hostLinkMbps * 1000) {
+                emitLaunchWarning(tr("PyroWave is set to %1 Mbps, but the host's %2 Mbps wired link carries at most %3 Mbps including FEC and headers. Lower the bitrate or run calibration.")
+                                  .arg(m_StreamConfig.bitrate / 1000).arg(hostLinkMbps).arg(hostLinkMbps));
             }
             const int clientLinkMbps = NetworkBuffers::routedWiredLinkMbps(
                 QHostAddress(m_Computer->activeAddress.address()));
-            if (clientLinkMbps > 0 && m_StreamConfig.bitrate > clientLinkMbps * 800) {
-                emitLaunchWarning(tr("PyroWave is set to %1 Mbps, but this PC's %2 Mbps wired link leaves room for only about %3 Mbps of video. Lower the bitrate or run calibration.")
-                                  .arg(m_StreamConfig.bitrate / 1000).arg(clientLinkMbps).arg(clientLinkMbps * 8 / 10));
+            if (clientLinkMbps > 0 && m_StreamConfig.bitrate > clientLinkMbps * 1000) {
+                emitLaunchWarning(tr("PyroWave is set to %1 Mbps, but this PC's %2 Mbps wired link carries at most %3 Mbps including FEC and headers. Lower the bitrate or run calibration.")
+                                  .arg(m_StreamConfig.bitrate / 1000).arg(clientLinkMbps).arg(clientLinkMbps));
             }
             const QString bufferWarning = NetworkBuffers::launchWarning();
             if (!bufferWarning.isEmpty()) {
@@ -1945,6 +1937,10 @@ bool Session::startConnectionAsync()
         return VrrReceiveDeadline::deadlineUs(rtpTimestamp, LiGetMicroseconds());
     });
 
+    if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) {
+        m_StreamConfig.pyrowaveLinkMbps = NetworkBuffers::routedWiredLinkMbps(
+            QHostAddress(m_Computer->activeAddress.address()));
+    }
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);

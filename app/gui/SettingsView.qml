@@ -733,23 +733,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 8000
                     ToolTip.visible: hovered && slider.pyroWave
-                    ToolTip.text: qsTr("PyroWave is a GPU wavelet codec. It needs a wired connection with hundreds of Mbps to spare and a host with PyroWave support; other hosts fall back to H.264. Fast lossless compression can reduce PyroWave bandwidth. On Linux, GPU readback and upload may limit frame rate.")
-                }
-
-                CheckBox {
-                    id: pyroWaveCompression
-                    width: parent.width
-                    visible: SystemProperties.hasPyroWave && slider.pyroWave
-                    text: qsTr("PyroWave compression")
-                    font.pointSize: 12
-
-                    checked: StreamingPreferences.pyroWaveCompression
-                    onCheckedChanged: StreamingPreferences.pyroWaveCompression = checked
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Apply fast lossless compression to independent detail groups. This can lower bandwidth without adding a frame of buffering; savings depend on the scene. Missing detail can still render as blur. Requires a host with PyroWave compression support; other hosts use normal PyroWave. Reconnect after changing this setting.")
+                    ToolTip.text: qsTr("PyroWave is a GPU wavelet codec. It needs a wired connection with hundreds of Mbps to spare and a host with PyroWave support; other hosts fall back to H.264. On Linux, GPU readback and upload may limit frame rate.")
                 }
 
                 CheckBox {
@@ -934,7 +918,8 @@ Flickable {
                                                      calibrationHosts.uuidAt(calibrationHost.currentIndex),
                                                      calibrationDialog.testFps,
                                                      Math.round(Screen.width * Screen.devicePixelRatio),
-                                                     Math.round(Screen.height * Screen.devicePixelRatio))
+                                                     Math.round(Screen.height * Screen.devicePixelRatio),
+                                                     StreamingPreferences.bitrateKbps)
                         }
                     }
 
@@ -1001,9 +986,8 @@ Flickable {
                     function tierText(option) {
                         if (!option) return PyroWaveCalibrator.running ? qsTr("Testing…") : "—"
                         if (option.tier === "error") return option.error
-                        if (option.tier === "slow") return qsTr("Can't keep up")
                         if (hdrUnavailable(option)) return qsTr("No HDR display")
-                        var text = option.tier === "any" ? qsTr("Any display") :
+                        var text = option.tier === "slow" ? qsTr("Can't keep up") : option.tier === "any" ? qsTr("Any display") :
                                    option.tier === "vrr" ? qsTr("Needs VRR") : qsTr("Needs VRR · Smooth mode")
                         if (option.quality === "reduced") text += " · " + qsTr("Reduced quality")
                         else if (option.quality === "low") text += " · " + qsTr("Low quality")
@@ -1022,22 +1006,21 @@ Flickable {
 
                     function optionDetail(option) {
                         if (!option || !option.valid) return ""
-                        if (!option.keepsUp) {
-                            return frameCost(option) + " " +
-                                    qsTr("A lower bitrate doesn't make this device fast enough, so the stream will stutter or fall behind. You can still use it.")
-                        }
                         var details = [frameCost(option)]
+                        if (!option.keepsUp) {
+                            details.push(qsTr("A lower bitrate doesn't make this device fast enough, so the stream will stutter or fall behind. You can still use it."))
+                        }
                         if (option.tier === "vrr") {
                             details.push(qsTr("With VRR the occasional slow frame is shown slightly late; on a fixed-refresh display it would stutter."))
                         }
                         else if (option.tier === "vrrLarge") {
                             details.push(qsTr("Slow frames use nearly the whole frame, so only the Smooth VRR latency mode's larger buffer hides them; other modes and fixed-refresh displays would stutter."))
                         }
-                        details.push(qsTr("%1 Mbps reaches %2 dB on the codec author's quality scale; he recommends %3 Mbps (35 dB) for this format.")
-                                     .arg(option.bitrateKbps / 1000).arg(option.qualityDb.toFixed(1))
+                        details.push(qsTr("%1 Mbps of image data reaches %2 dB on the codec author's quality scale; he recommends %3 Mbps of image data (35 dB) for this format. The applied rate includes FEC and packet overhead.")
+                                     .arg(option.imageKbps / 1000).arg(option.qualityDb.toFixed(1))
                                      .arg(option.guideKbps / 1000))
                         if (option.deviceLimited) details.push(qsTr("The bitrate was lowered so this device keeps up."))
-                        else if (option.linkLimited) details.push(qsTr("The bitrate is capped by this device's network link."))
+                        if (option.linkLimited) details.push(qsTr("The tested network budget cannot carry the recommended image quality plus FEC; image quality was reduced."))
                         return details.join(" ")
                     }
 
@@ -1104,7 +1087,7 @@ Flickable {
                                 wrapMode: Text.Wrap
                                 font.pointSize: 9
                                 text: PyroWaveCalibrator.linkSummary + " " +
-                                      qsTr("The bandwidth test is a bulk transfer; a live stream can still encounter packet loss or congestion. Clicking a format applies the bitrate shown.")
+                                      qsTr("The UDP test checks packet loss and delivery stability. Clicking a format applies the total bitrate shown, including FEC and overhead.")
                             }
 
                             Repeater {

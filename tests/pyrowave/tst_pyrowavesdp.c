@@ -55,6 +55,7 @@ static char* generateSdp(int format, int compression) {
     StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
     StreamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
     StreamConfig.pyrowaveCompression = compression;
+    StreamConfig.pyrowaveLinkMbps = 1000;
     NegotiatedVideoFormat = format;
     RemoteAddr.ss_family = AF_INET;
     AudioEncryptionEnabled = false;
@@ -80,6 +81,8 @@ int main(void) {
                "Normal PyroWave advertises only record framing");
         EXPECT(strstr(normal, "pyrowaveCompression") == NULL,
                "Normal PyroWave does not request compression transport");
+        EXPECT(strstr(normal, "a=x-ss-video[0].pyrowaveLinkMbps:1000 \r\n") != NULL,
+               "PyroWave sends the receiver link speed for host pacing");
         free(normal);
 
         char* compression = generateSdp(pyrowaveFormats[i], 1);
@@ -100,6 +103,8 @@ int main(void) {
                "A non-PyroWave codec never opts into compression transport");
         EXPECT(strstr(fallback, "pyrowaveFeatures") == NULL,
                "A non-PyroWave codec never advertises PyroWave features");
+        EXPECT(strstr(fallback, "pyrowaveLinkMbps") == NULL,
+               "Other codecs do not send PyroWave pacing attributes");
         free(fallback);
     }
 

@@ -1,6 +1,9 @@
 TEMPLATE = subdirs
 CONFIG += ordered
 
+linkpolicy.file = $$PWD/linkpolicy.pro
+SUBDIRS += linkpolicy
+
 framing.file = $$PWD/framing.pro
 SUBDIRS += framing
 

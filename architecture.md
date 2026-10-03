@@ -41,15 +41,17 @@ the `PyroWave` codec choice negotiates Themaister's intra-only wavelet codec
 partial frame can render with missing detail as blur; a rejected frame is dropped
 without an IDR request because the next frame is independent.
 
-PyroWave independent compression (2026-09-30, reviewed over `1ad5848b` plus
-this worktree): Settings > Video codec > PyroWave exposes PyroWave compression.
-Both endpoints advertise/negotiate compression version 1 and feature `0x8`;
-unsupported hosts use ordinary transport with a launch warning. The abandoned
-Hybrid preference migrates to the new setting, but its `0x4` feature, frame-reference
-wire format and ACK control path are removed.
+PyroWave independent compression (2026-10-01, reviewed over `9a9dda86` plus
+this worktree): the compression setting and session opt-in have been removed.
+Moonlight uses ordinary PyroWave transport and removes saved `pyrowavecompression`
+and `pyrowavehybrid` preferences. The decoder defaults to compression disabled.
+Compression version 1 and feature `0x8` remain in the shared protocol code and
+framing tests; they are not requested by production sessions. The abandoned
+Hybrid `0x4` feature, frame-reference wire format and ACK control path are removed.
 
-The host still encodes a complete intra frame, preserves its raw coarse-data prefix,
-and packs detail into independent groups of at most 64 KiB using fast LZ4. A 4 KiB
+When another client requests the retained compression contract, the host encodes
+a complete intra frame, preserves its raw coarse-data prefix, and packs detail
+into independent groups of at most 64 KiB using fast LZ4. A 4 KiB
 sample avoids full passes on high-entropy groups. Incompressible groups use native
 records; if repacking erases the gain, the original framed bytes are sent unchanged.
 Compression failures also send the native frame, including native framing's
@@ -348,35 +350,47 @@ stall can land in any run.
 The default bitrate and calibration's author recommendation use the same
 35 dB calculation rounded up to 5 Mbps, including the HDR allowance. The
 default no longer applies a separate 900 Mbps cap and needs no calibration.
-Calibration now requires a selected online, paired PyroWave host. Before the GPU
-sweep, the client downloads four 32 MiB probes from that host over pinned HTTPS.
-It discards the warm-up and uses the slowest of the other three as its bulk
-host-to-client throughput estimate. The bitrate is capped at 80% of the
-smallest known value among that measurement, the host's routed physical wired
-transmit speed from `/serverinfo`, and this PC's wired receive speed from
-`NetworkBuffers::wiredLinkMbps()`. The reserve covers record padding, FEC,
-RTP/UDP/IP headers, audio, input, and contention. The table grades 4K 4:4:4
-at the selected FPS against that cap; bulk HTTPS throughput cannot prove that
-live UDP bursts will be loss-free. If the host lacks the probe API or the
-transfer fails, calibration reports the error instead of presenting an
-uncapped recommendation. If the
-top bitrate misses, a quick run at the regression floor (30 dB) checks whether
-a lower bitrate cuts the mean GPU time per frame by at least 10%. If not, the
-format is "Can't keep up" at the top bitrate, which it applies if selected: a
-pass at the lower bitrate would be noise at the period's edge, bought with
-picture quality. If it does, the floor
-is timed and one bisection step on the dB scale finds the highest bitrate that
-keeps up. `pyroWaveQualityDb()` inverts the author's regression (linear between
-whole-dB levels, extrapolated below 30 dB) to grade the chosen bitrate: at
-least 35 dB is full quality, 32-35 dB reduced, below 32 dB low, shown as text.
+Calibration (2026-10-02, reviewed against client `e2fd1c57` and host
+`6d8fc5ac` plus these changes) requires an online paired PyroWave host advertising
+UDP probe v1 and wire budget v1. The selected bitrate is tested first with a
+2-second paced UDP probe; passing rates grow by 25% until a failure or the
+physical-link/3 Gbps limit. Bisection finds the boundary in 5 Mbps steps. A
+candidate must have <=0.1% overall loss, <=1% loss in every 100 ms window,
+<=4 ms p99 relative transit variation, <=2 ms growth, and complete/on-time host
+sending. The chosen rate leaves 5% margin where possible and passes two fresh
+confirmations; failed confirmation backs off another 20%. Sequence accounting
+includes lost tails without counting duplicates. Missing support, blocked UDP,
+or a persistently unstable route gives no recommendation. The legacy bulk
+HTTPS probe remains available but is not used to grade stability.
+
+Calibration converts the confirmed total wire rate to image bitrate using the
+host's critical FEC percentage, minimum parity, the selected packet size, packet
+headers/rounding, and audio/control reserve. The shared bandwidth formula only
+reserves parity for one critical block; adaptive detail parity consumes spare
+cadence budget within the same total. GPU probes begin at the author's image
+recommendation, climb by 50% up to the network/frame-capacity bound, and refine
+a failure with three bisections. If the initial rate fails, the existing floor
+probe and minimum 10% GPU saving rule still govern reducing image quality.
+Applied rates include FEC and headers; the quality estimate and tooltip use
+image Mbps. Reduced/low quality stays visible even on slow-format rows.
+`pyroWaveQualityDb()` retains its existing regression/inversion semantics.
+
+At stream launch the client's known routed wired speed is sent in
+`x-ss-video[0].pyrowaveLinkMbps`; the host uses the smaller known endpoint speed
+for packet pacing. Its physical wire cap no longer applies a second 20%
+reduction after calibration. The UDP probe uses 1 ms groups, not a live encoded
+frame stream: host encoding, actual frame bursts, sustained gameplay and
+physical scanout remain unverified. No calibration cache is introduced. See
+[protocol details](docs/pyrowave-protocol.md#fec-inclusive-recommendations-and-udp-calibration).
+
 The color is smoothness risk, with margin for a live stream costing about a
 third more than the test (4K 4:4:4 10-bit took 8.3-9.1 ms per frame while
 backlogged live against a 6.7 ms test mean): green ("Any display") at a p99
 cost of at most 60% of the period, yellow ("Needs VRR") up to 80%, orange
 ("Needs VRR · Smooth mode", the large buffer) up to the full period, and red
 ("Can't keep up") beyond it. Clicking a format applies the codec, resolution, chroma, HDR and the
-bitrate shown, and turns off automatic bitrate. A full sweep at 116 FPS takes
-about 100 s on the Deck.
+bitrate shown, and turns off automatic bitrate. The upward search adds fresh measurements; the former approximately 100 s
+116 FPS sweep timing no longer describes a complete calibration.
 
 Why this shape, on the Deck (Van Gogh, 4K HDR10 target, 116 FPS): decode cost
 follows resolution and chroma, not bitrate. Decode alone for 4K 4:4:4 10-bit
@@ -3710,6 +3724,18 @@ intentional queue protection, submission behavior, and native/display evidence.
 An average FPS counter alone can conceal all of these.
 
 ## 15. Tests, deployment boundaries, and maintenance
+
+For opt-in Linux bandwidth testing, [moonlight-link-test.py](scripts/moonlight-link-test.py)
+redirects incoming IPv4/IPv6 traffic on a selected interface through an IFB with a bounded TBF
+queue (default 1000 Mbps, 2 ms of queue service). It exercises packet delivery
+and reassembly before decode; existing frame-level VRR replay cannot model this
+bottleneck. It is an approximate software link, not physical gigabit timing,
+and does not alter production policy. An optional host filter limits only that
+host's incoming UDP. See [network-link-testing.md](docs/network-link-testing.md)
+for activation, counters, limitations and removal. Isolated Linux namespace
+checks cover IPv4/IPv6 setup/removal, real IPv4 UDP redirection and overflow,
+host isolation, existing-rule refusal and failed-setup rollback; live gameplay
+and sustained gigabit throughput remain separate validation.
 
 The deterministic suites are
 [tst_vrrtimingcontroller.cpp](tests/vrr/tst_vrrtimingcontroller.cpp),

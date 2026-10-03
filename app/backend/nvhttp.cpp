@@ -12,6 +12,8 @@
 #include <QImageReader>
 #include <QtEndian>
 #include <QNetworkProxy>
+#include <QUdpSocket>
+#include <stdexcept>
 
 #define FAST_FAIL_TIMEOUT_MS 2000
 #define REQUEST_TIMEOUT_MS 5000
@@ -215,6 +217,68 @@ int NvHTTP::probePyroWaveDownloadMbps()
                                       "Incomplete PyroWave bandwidth probe");
     }
     return qRound(bytes * 8.0 / clock.elapsed() / 1000.0);
+}
+
+PyroWaveLink::Result NvHTTP::probePyroWaveUdp(int kbps, int packetSize, const std::atomic<bool>& cancelled)
+{
+    if (m_ServerCert.isNull() || httpsPort() == 0 || kbps < 5000 || kbps > 3000000 ||
+        packetSize < 256 || packetSize > 1392) {
+        throw std::runtime_error("Invalid or unauthenticated PyroWave UDP probe");
+    }
+    QUdpSocket socket;
+    const QHostAddress host(m_BaseUrlHttps.host());
+    if (host.isNull() || !socket.bind(host.protocol() == QAbstractSocket::IPv6Protocol ?
+                                    QHostAddress::AnyIPv6 : QHostAddress::AnyIPv4, 0)) {
+        throw std::runtime_error("Could not open the PyroWave UDP receiver");
+    }
+    socket.setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, 8 * 1024 * 1024);
+    const QByteArray token = QUuid::createUuid().toRfc4122().toHex();
+    PyroWaveLink::Result result;
+    result.requestedKbps = kbps;
+    result.expected = uint64_t(kbps) * PyroWaveLink::durationMs / (8 * (packetSize + 134));
+    std::vector<int64_t> arrivals(result.expected, -1);
+    QElapsedTimer clock;
+    clock.start();
+    const auto receive = [&] {
+        char packet[2048];
+        // Bound a callback so HTTP completion/timeouts cannot starve if other
+        // traffic arrives continuously. Cancellation still drains without grading.
+        for (int count = 0; count < 4096 && socket.hasPendingDatagrams(); ++count) {
+            QHostAddress source;
+            const auto bytes = socket.readDatagram(packet, sizeof(packet), &source);
+            if (bytes != packetSize + 48 || source != host ||
+                memcmp(packet, token.constData(), 32) != 0 || cancelled.load()) continue;
+            const auto seq = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(packet + 32));
+            if (seq < arrivals.size() && arrivals[seq] < 0) arrivals[seq] = clock.nsecsElapsed() / 1000;
+        }
+    };
+    connect(&socket, &QUdpSocket::readyRead, &socket, receive);
+    QTimer poll;
+    connect(&poll, &QTimer::timeout, &socket, receive);
+    poll.start(1);
+    // ReadyRead continues draining UDP inside openConnection's event loop while
+    // the host sends; the reliable response gives the count including lost tails.
+    const QString reply = openConnectionToString(m_BaseUrlHttps, "pyrowave-udp-probe",
+        QString("kbps=%1&port=%2&packetsize=%3&token=%4")
+            .arg(kbps).arg(socket.localPort()).arg(packetSize).arg(QString::fromLatin1(token)),
+        6000, NVLL_ERROR);
+    verifyResponseStatus(reply);
+    bool validExpected = false, validSent = false, validElapsed = false;
+    const auto expected = getXmlString(reply, "expected").toUInt(&validExpected);
+    result.sent = getXmlString(reply, "sent").toUInt(&validSent);
+    result.senderMs = getXmlString(reply, "elapsedMs").toDouble(&validElapsed);
+    if (!validExpected || expected != result.expected || !validSent || result.sent > expected ||
+        !validElapsed || !std::isfinite(result.senderMs)) {
+        throw std::runtime_error("Invalid PyroWave UDP probe result");
+    }
+    // Allow a bounded reordered tail; its delay is still scored against the
+    // sender schedule, never forgiven as good throughput.
+    QEventLoop drain;
+    QTimer::singleShot(100, &drain, &QEventLoop::quit);
+    drain.exec();
+    receive();
+    PyroWaveLink::summarize(result, arrivals);
+    return result;
 }
 
 void

@@ -134,11 +134,6 @@ public:
         return m_StreamConfig.colorRange;
     }
 
-    bool streamPyroWaveCompression() const
-    {
-        return m_StreamConfig.pyrowaveCompression != 0;
-    }
-
     QString vrrCalibrationContext() const;
 
     void flushWindowEvents();

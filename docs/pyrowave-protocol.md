@@ -38,12 +38,11 @@ different frame framing; see "Compatibility".
 The host ORs these bits into `ServerCodecModeSupport` when PyroWave encoding works
 on the capture adapter:
 
-A PyroWave-capable host advertises `PyroWaveCompressionVersion=1`. This exact
-version is required for the optional PyroWave compression setting; clients fall
-back to ordinary PyroWave with a launch warning when the host does not support it.
-The setting is off by default and applies when the next stream connects. An
-existing enabled Hybrid preference migrates to compression; it never negotiates
-the abandoned frame-reference protocol.
+A PyroWave-capable host can advertise `PyroWaveCompressionVersion=1`. Moonlight's
+compression setting and session opt-in were removed on 2026-10-01; production
+sessions use ordinary PyroWave and discard saved compression/Hybrid preferences.
+The compression contract below remains implemented in shared protocol code and
+framing tests, but production sessions do not request it.
 
 For a paired HTTPS `/serverinfo` request, a capable host also returns
 `PyroWaveHostLinkMbps` (zero if its outbound route is not a known physical wired
@@ -52,13 +51,9 @@ local transmit speed, not measured end-to-end throughput. Linux and Windows
 resolve the route to the requesting client; Linux ignores virtual, wireless,
 half-duplex and inactive interfaces.
 
-The paired client can GET `/pyrowave-bandwidth-probe` over its pinned HTTPS
-connection. It receives exactly 32 MiB of fixed binary payload
-to time. The client discards a warm-up and uses the slowest of three measurements,
-then reserves 20% for protocol overhead and contention. The result is a bulk
-host-to-client throughput estimate. It does not prove that live UDP bursts will
-avoid packet loss, so calibration remains a recommendation rather than a stream
-quality guarantee.
+The legacy 32 MiB HTTPS download probe remains available for old clients.
+New calibration uses authenticated UDP probes to measure loss and stability;
+see [FEC-inclusive recommendations](#fec-inclusive-recommendations-and-udp-calibration).
 
 | Bit | Value | Meaning |
 |---|---|---|
@@ -441,3 +436,64 @@ HDR10. At 60 fps that is about 220 Mbps for 1080p and 290 Mbps for 1440p and 4K 
 | Xbox / azafrob-protocol client, our host | Negotiates PyroWave, length-prefixed framing. Bitstream compatibility depends on their PyroWave commit. |
 | Our client, dimizago Vibepollo host | Negotiates PyroWave from the SCM bits; length-prefixed framing is detected per frame. |
 | Stock Moonlight | Never sees PyroWave; negotiates H.264/HEVC/AV1 as before. |
+
+## FEC-inclusive recommendations and UDP calibration
+
+Paired server info advertises `PyroWaveWireBudgetVersion=1`,
+`PyroWaveCriticalFecPercentage`, `PyroWaveMinParityShards=2`, and
+`PyroWaveUdpProbeVersion=1`. The bitrate applied by calibration is a total
+wire allowance. `pyrowavebandwidth.h` (Moonlight) and `pyrowave_bandwidth.h`
+(Vibeshine) share the conversion between it and the image allowance: reserve
+one maximum feasible critical FEC block, packet rounding, IPv6, encryption,
+Ethernet overhead, and 3572 kbps for up to eight high-quality audio channels,
+audio parity and control. Adaptive detail parity spends unused cadence budget
+inside this allowance; it is not another blanket 50% charge. Quality labels
+use the remaining image allowance against the author's 35 dB recommendation.
+
+The paired client requests `/pyrowave-udp-probe?kbps=...&port=...&packetsize=...&token=...`
+over pinned HTTPS. Parameters are 5000–3000000 kbps, a nonprivileged UDP port,
+a 256–1392 byte packet size, and a fresh 32-character lowercase hex token.
+The destination IP is always the authenticated HTTPS peer's IP; this is a
+LAN probe, and a NAT/firewall blocking its UDP port produces no recommendation.
+The host refuses probes during stream activity and serializes them with stream
+operations on the existing blocking worker. Each probe lasts two seconds and
+paces whole packets in 1 ms groups. Its UDP payload is `packetsize + 48` bytes:
+ASCII token at bytes 0–31, big-endian sequence at bytes 32–35, then filler.
+Each packet is charged `packetsize + 134` wire bytes, matching the conservative
+IPv6/encrypted streaming budget. HTTPS returns XML `expected`, `sent`, and
+`elapsedMs`; reliable counts include lost final packets. Duplicates, foreign
+packets, and previous probes cannot inflate delivery. Sequence IDs tolerate
+reordering; a 100 ms drain still charges tail delay against the send schedule.
+
+Calibration starts at the selected bitrate (bounded by known routed wired link
+speeds and the 3 Gbps UI limit), grows by 25% while passing, then bisects the
+passing/failing bracket to 5 Mbps. A pass requires all planned packets sent,
+no more than 0.1% aggregate loss or 1% loss in any 100 ms window, p99 transit
+variation at most 4 ms, delay growth at most 2 ms, and sender duration within
+2% of the requested duration. These are calibration policy thresholds, not FEC
+recovery guarantees. The highest passing rate is reduced by 5% where possible
+and measured twice afresh. Failed confirmation reduces the rate by 20% and
+retests; persistent loss, blocked UDP, malformed responses, or an unsupported
+host do not produce a rate. Cancellation abandons the current result.
+
+Each GPU format starts at the author's image recommendation within that
+confirmed wire budget, then increases image bitrate until it reaches the budget
+or device overload. Three bisections refine the device boundary; the existing
+lower-quality/device test remains for formats that fail at their initial rate.
+Results show the applied total Mbps, visible reduced/low quality, and image Mbps
+in the details. Format measurements use the selected packet size and respect
+the sender's frame capacity. Rates round up to 5 Mbps only when they still fit
+the confirmed budget. The default uncalibrated author guide is unchanged.
+
+Moonlight announces `x-ss-video[0].pyrowaveLinkMbps` when the routed client wired
+link speed is known. Host packet pacing uses the smaller known host/client link
+speed, preventing a faster host from sending oversized groups into a slower
+receiver. The host limits the total budget at physical link capacity; it no
+longer silently applies a second 20% reduction to an already tested allowance.
+Calibration results are not cached or silently reapplied at a later launch.
+
+This tests fresh UDP delivery and synthetic GPU work separately. It does not
+prove sustained gameplay smoothness, host encoding speed, frame-burst delivery,
+or physical scanout. The older 32 MiB HTTPS download endpoint remains available
+for older clients; new calibration does not use its loss-hidden throughput as
+proof of stability.

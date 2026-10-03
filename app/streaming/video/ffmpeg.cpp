@@ -2273,7 +2273,6 @@ bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
     config.height = params->height;
     config.chroma444 = (params->videoFormat & VIDEO_FORMAT_MASK_YUV444) != 0;
     config.tenBit = (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) != 0;
-    config.compression = Session::get() && Session::get()->streamPyroWaveCompression();
 #ifndef Q_OS_WIN32
     config.vulkanPool = m_BackendRenderer->getPyroWaveVulkanPool();
 #endif
