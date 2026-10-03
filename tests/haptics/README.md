@@ -35,7 +35,7 @@ check asserts the dispatched bytes, not the virtual driver's return status.
 For real playback, use the coordinated Vibeshine and Moonlight builds. Pair the
 DualSense/Edge to the Windows or Linux **client**, select DS5 (or automatic PlayStation
 emulation) on the host, then reconnect the stream. The client log must contain
-`DualSense Bluetooth waveform backend ready`. Ordinary USB connections and
+`DualSense Bluetooth waveform backend ready`. Linux USB connections and
 unsupported clients keep conventional rumble. The game must send native haptic
 PCM to the Linux host virtual controller's audio endpoint. Windows uses its
 built-in HID driver and the exact device path owned by SDL; no controller-name
@@ -59,3 +59,18 @@ The wire payload and its CRC remain the pinned SAxense adaptation.
 `moonlight --haptics-license` prints the embedded source and notices; see
 [`PROVENANCE.md`](../../third-party/saxense/PROVENANCE.md) for the pinned source,
 licenses and distribution requirements.
+
+## Windows USB waveform playback
+
+A USB DualSense/Edge uses its own four-channel WASAPI playback endpoint, matched
+by the exact SDL HID device container. It uses inbox Windows drivers and sends
+actuator PCM only to channels 3/4, keeping channels 1/2 silent. The log must show
+`DualSense USB waveform backend ready ... (WASAPI)`. A stereo endpoint is rejected;
+keep the controller playback device in its default four-channel format.
+
+Validate USB separately on Windows hardware using the left/right native effects,
+input, adaptive-trigger, idle, disconnect/reconnect and stream-exit checks above.
+Confirm the headset channels remain silent. The deterministic recording-output
+test exercises Bluetooth and the shared receive queue; it does not validate
+WASAPI discovery, engine buffering or physical USB feedback. USB hardware
+validation is pending.

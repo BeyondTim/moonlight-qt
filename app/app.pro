@@ -56,7 +56,7 @@ win32 {
     }
 
     INCLUDEPATH += $$PWD/../libs/windows/include
-    LIBS += dcomp.lib advapi32.lib ws2_32.lib iphlpapi.lib shell32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib hid.lib
+    LIBS += dcomp.lib advapi32.lib cfgmgr32.lib ws2_32.lib iphlpapi.lib shell32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib hid.lib
 }
 macx:!disable-prebuilts {
     !exists($$PWD/../libs/mac) {

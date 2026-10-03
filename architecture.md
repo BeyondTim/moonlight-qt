@@ -3339,7 +3339,7 @@ queued audio latency. Muting can suppress audio processing without retiming VRR.
 
 Input goes from SDL handlers to common-library input APIs and a separate sender.
 
-Windows/Linux DualSense waveform feedback (updated 2026-09-19) runs separately
+Windows/Linux DualSense waveform feedback (updated 2026-10-02) runs separately
 from video and ordinary stream audio. A Bluetooth Sony DualSense/Edge with an
 exact SDL HID device path can advertise controller capability
 `LI_CCAP_HAPTICS_PCM` (`0x8000`) after its output backend opens successfully.
@@ -3362,18 +3362,30 @@ Output is padded to the descriptor's maximum report length while preserving the
 wait; timeout cancels and drains the operation before its buffer can be reused
 or freed. This is not a hard bound on a faulty driver's cancellation completion.
 Input stays with SDL; no kernel module or Bluetooth reconfiguration is added on
-the client. USB and other platforms keep ordinary rumble. Native game haptics
+the client. Windows USB additionally matches the exact SDL Sony USB controller's
+HID device container to its active four-channel WASAPI render endpoint. The
+worker submits 48 kHz float samples to actuator channels 3/4 while keeping
+channels 1/2 silent; endpoints whose mix format is not four channels are rejected.
+Shared-mode conversion uses the endpoint's channel mask. Startup buffers 10 ms
+(or waits at most 10 ms); the software FIFO is capped at 40 ms, separately from
+the requested 20 ms engine buffer. The actual engine buffer size is queried.
+Idle output drains to silence, and disconnect joins the worker before SDL closes
+the controller. Linux USB and other platforms keep ordinary rumble. Native game
+haptics
 must originate from the Linux Vibeshine host's controller
 audio endpoint; game soundtrack audio is not a substitute.
 
-Playback drops old/duplicate packets, resets conversion history on packet loss,
+Bluetooth playback drops old/duplicate packets, resets conversion history on
+packet loss,
 bounds its input and converted queues, sends silence on underflow/idle/removal,
 and joins its worker before SDL closes the controller. It cancels SDL emulated
 rumble when waveform playback starts and suppresses legacy rumble while active;
 LED, motion and adaptive-trigger callbacks retain their own paths. Write failure
 stops that waveform worker and logs the need to reconnect; ordinary controller
 input continues. Hardware coexistence with other applications writing the same
-controller still requires physical testing.
+controller still requires physical testing. The USB backend has not been validated
+on Windows hardware; Linux deterministic tests cover the shared input queue and
+existing Bluetooth worker, not WASAPI endpoint discovery or physical output.
 
 Adaptive triggers already use `SDL_GameControllerSendEffect` on Windows and
 Linux, independently of PCM support. SDL owns Bluetooth framing/CRC. The shared
