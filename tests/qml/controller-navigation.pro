@@ -1,9 +1,15 @@
 TEMPLATE = app
 TARGET = tst_controllernavigation
 QT += gui qml network testlib
-CONFIG += console testcase c++17 link_pkgconfig
+CONFIG += console testcase c++17
 CONFIG -= app_bundle
-PKGCONFIG += sdl2
+macx:!disable-prebuilts {
+    INCLUDEPATH += $$PWD/../../libs/mac/include $$PWD/../../libs/mac/include/SDL2
+    LIBS += -L$$PWD/../../libs/mac/lib -lSDL2
+} else {
+    CONFIG += link_pkgconfig
+    PKGCONFIG += sdl2
+}
 INCLUDEPATH += $$PWD/../../app
 SOURCES += $$PWD/tst_controllernavigation.cpp \
     $$PWD/../../app/gui/sdlgamepadkeynavigation.cpp \

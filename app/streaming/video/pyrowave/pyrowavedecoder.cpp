@@ -371,12 +371,18 @@ bool PyroWaveDecoder::initialize(const Config& config, IPyroWaveSurfacePool* poo
         }
         else {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "PyroWave: cannot share the renderer's Vulkan device (%s); reading frames back instead",
-                        resultString(result));
+                        "PyroWave: cannot share the renderer's Vulkan device (%s)%s",
+                        resultString(result), config.requireSharedOutput ? "" :
+                        "; reading frames back instead");
             impl->device = nullptr;
         }
     }
     if (impl->device == nullptr) {
+        if (config.requireSharedOutput) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "PyroWave: the renderer's shared Vulkan device is required");
+            return false;
+        }
         result = pyrowave_create_default_device(&impl->device);
         if (result != PYROWAVE_SUCCESS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,

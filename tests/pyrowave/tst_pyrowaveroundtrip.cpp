@@ -1,7 +1,7 @@
 // Encodes synthetic frames with the vendored PyroWave encoder, frames them the
 // way hosts do (record framing aligned to RTP payloads, and the length-prefixed
 // compatibility framing), and decodes them through the client's framing parser.
-// Needs a Vulkan GPU; exits 0 with a notice when none is present.
+// Needs a Vulkan GPU; --require-gpu makes an unavailable device a failure.
 
 #include "../../app/streaming/video/pyrowave/pyrowaveframing.h"
 
@@ -14,6 +14,10 @@
 #include <chrono>
 #include <memory>
 #endif
+#ifdef __APPLE__
+#include "../../app/streaming/video/pyrowave/pyrowavedecoder.h"
+#include <chrono>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +26,11 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#ifdef __APPLE__
+bool checkPyroWaveMetalDecode(const std::vector<uint8_t>& records, int width, int height,
+                              bool chroma444, bool tenBit);
+#endif
 
 namespace {
 
@@ -414,6 +423,74 @@ void checkLinuxClientDecode(const std::vector<uint8_t>& records, const Planes& s
 }
 #endif
 
+#ifdef __APPLE__
+// Exercise the client's synchronous fallback independently of Metal sharing.
+// These checks also establish that the macOS format conversion keeps all three
+// planes at both negotiated depths; C API-only reconstruction cannot do that.
+void checkMacClientReadback(const std::vector<uint8_t>& records, const Planes& source,
+                            const std::string& name, bool tenBit)
+{
+    const std::string label = name + " Mac readback" + (tenBit ? " 10-bit" : " 8-bit");
+    PyroWaveDecoder client;
+    PyroWaveDecoder::Config config;
+    config.width = source.width;
+    config.height = source.height;
+    config.chroma444 = source.chroma444;
+    config.tenBit = tenBit;
+    if (!client.initialize(config, nullptr)) {
+        expect(false, label + ": client initialization");
+        return;
+    }
+    expect(!client.hasAsynchronousOutput(), label + ": readback is complete on return");
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) {
+        expect(false, label + ": frame allocation");
+        return;
+    }
+    PyroWaveDecoder::DecodeDiagnostics diagnostics;
+    const auto start = std::chrono::steady_clock::now();
+    const bool decoded = client.decode(records.data(), records.size(), {}, 0, frame, &diagnostics);
+    const auto complete = std::chrono::steady_clock::now();
+    if (!decoded) {
+        expect(false, label + ": client decode: " + client.lastError());
+        av_frame_free(&frame);
+        return;
+    }
+    const int expected = tenBit ?
+        (source.chroma444 ? AV_PIX_FMT_YUV444P16 : AV_PIX_FMT_YUV420P16) :
+        (source.chroma444 ? AV_PIX_FMT_YUV444P : AV_PIX_FMT_YUV420P);
+    expect(frame->format == expected, label + ": pixel format");
+    expect(frame->width == source.width && frame->height == source.height, label + ": frame size");
+    expect(!diagnostics.partial && diagnostics.receivedBlocks == diagnostics.announcedBlocks,
+           label + ": intact payload diagnostics");
+    const std::vector<uint8_t>* sourcePlanes[] = { &source.y, &source.cb, &source.cr };
+    double quality[3] = {};
+    for (int plane = 0; plane < 3; ++plane) {
+        const int width = plane ? source.chromaWidth() : source.width;
+        const int height = plane ? source.chromaHeight() : source.height;
+        if (!frame->data[plane]) {
+            expect(false, label + ": planar output");
+            continue;
+        }
+        std::vector<uint8_t> samples(size_t(width) * height);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const auto* sample = frame->data[plane] + y * frame->linesize[plane] + x * (tenBit ? 2 : 1);
+                uint16_t value16 = 0;
+                if (tenBit) std::memcpy(&value16, sample, sizeof(value16));
+                samples[size_t(y) * width + x] = tenBit ? uint8_t(value16 >> 8) : *sample;
+            }
+        }
+        quality[plane] = psnr(*sourcePlanes[plane], samples);
+        expect(quality[plane] > (plane == 0 ? 30.0 : 25.0), label + ": plane PSNR " + std::to_string(quality[plane]));
+    }
+    std::printf("%s: completed decode %.2f ms, Y/Cb/Cr PSNR %.1f/%.1f/%.1f dB\n", label.c_str(),
+                std::chrono::duration<double, std::milli>(complete - start).count(),
+                quality[0], quality[1], quality[2]);
+    av_frame_free(&frame);
+}
+#endif
+
 void putU32(std::vector<uint8_t>& out, uint32_t value)
 {
     for (int i = 0; i < 4; i++) {
@@ -674,6 +751,15 @@ void runCase(pyrowave_device device, int width, int height, bool chroma444, size
             }
         }
 #endif
+#ifdef __APPLE__
+        if (frameIndex == 0) {
+            for (bool tenBit : { false, true }) {
+                checkMacClientReadback(records, source, name, tenBit);
+                expect(checkPyroWaveMetalDecode(records, width, height, chroma444, tenBit),
+                       name + ": shared Metal client decode");
+            }
+        }
+#endif
         recordBytes += records.size();
         if (decodeFramed(decoder, records, geometry, PyroWaveFraming::Framing::Records, decoded, name + " records")) {
             const double quality = psnr(source.y, decoded.y);
@@ -812,6 +898,13 @@ void runChromaDetailCase(pyrowave_device device, int width, int height, size_t b
                 }
             }
 #endif
+#ifdef __APPLE__
+            for (bool tenBit : { false, true }) {
+                checkMacClientReadback(records, source, name, tenBit);
+                expect(checkPyroWaveMetalDecode(records, width, height, true, tenBit),
+                       name + ": shared Metal chroma detail");
+            }
+#endif
         }
     }
 
@@ -826,18 +919,35 @@ bool checkPyroWaveCompressionClientDecode(pyrowave_device device);
 
 int main(int argc, char** argv)
 {
+    bool requireGpu = false;
+    bool dequantOnly = false;
+    bool compressionOnly = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--require-gpu") == 0) requireGpu = true;
+        else if (std::strcmp(argv[i], "--dequant-only") == 0) dequantOnly = true;
+        else if (std::strcmp(argv[i], "--compression-only") == 0) compressionOnly = true;
+        else {
+            std::fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (dequantOnly && compressionOnly) {
+        std::fprintf(stderr, "Choose at most one focused GPU test mode\n");
+        return 2;
+    }
     pyrowave_device device = nullptr;
     if (pyrowave_create_default_device(&device) != PYROWAVE_SUCCESS) {
-        std::printf("No Vulkan device for PyroWave; skipping the round trip\n");
-        return 0;
+        std::fprintf(stderr, "No Vulkan device for PyroWave; %s the round trip\n",
+                     requireGpu ? "failing" : "skipping");
+        return requireGpu ? 1 : 0;
     }
 
-    if (argc == 2 && std::strcmp(argv[1], "--dequant-only") == 0) {
+    if (dequantOnly) {
         const bool passed = checkPyroWaveDequantStores();
         pyrowave_device_destroy(device);
         return passed ? 0 : 1;
     }
-    if (argc == 2 && std::strcmp(argv[1], "--compression-only") == 0) {
+    if (compressionOnly) {
         const bool passed = checkPyroWaveCompressionClientDecode(device);
         pyrowave_device_destroy(device);
         return passed ? 0 : 1;
@@ -862,6 +972,12 @@ int main(int argc, char** argv)
     runCase(device, 1920, 1080, false, 400 * 1024);
     runCase(device, 1920, 1080, true, 650 * 1024);
     runChromaDetailCase(device, 1920, 1080, 650 * 1024);
+#ifdef __APPLE__
+    // Large native/shared-plane coverage, including clipped wavelet tiles at
+    // the current Mac panel's 3024x1964 resolution.
+    runCase(device, 3840, 2160, true, 2600 * 1024);
+    runCase(device, 3024, 1964, true, 1880 * 1024);
+#endif
 
     pyrowave_device_destroy(device);
 

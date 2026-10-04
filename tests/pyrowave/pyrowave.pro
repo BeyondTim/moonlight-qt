@@ -26,9 +26,19 @@ linux:contains(QT_ARCH, x86_64) {
     roundtrip.file = $$PWD/roundtrip.pro
     SUBDIRS += roundtrip
 }
+macx {
+    roundtrip.file = $$PWD/roundtrip.pro
+    SUBDIRS += roundtrip
+
+    metalcalibration.file = $$PWD/metalcalibration.pro
+    SUBDIRS += metalcalibration
+}
 
 rtpqueue.file = $$PWD/rtpqueue.pro
 SUBDIRS += rtpqueue
 
 udpreceive.file = $$PWD/udpreceive.pro
 SUBDIRS += udpreceive
+
+udpaddress.file = $$PWD/udpaddress.pro
+SUBDIRS += udpaddress

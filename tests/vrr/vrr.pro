@@ -3,6 +3,11 @@
 TEMPLATE = subdirs
 CONFIG += ordered
 
+macx {
+    macdisplaytiming.file = $$PWD/macdisplaytiming.pro
+    SUBDIRS += macdisplaytiming
+}
+
 dxgipresent.file = $$PWD/dxgipresent.pro
 SUBDIRS += dxgipresent
 

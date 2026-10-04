@@ -1206,10 +1206,11 @@ void VrrPacingWorker::recordSubmission(
     observation.submission = telemetry.submissionBoundaryUs;
     observation.ready = telemetry.preparationEndUs;
     observation.deadline = decision.originalScanoutUs;
-    // Vulkan and composition do not select DXGI latch modes. A requested
+    // Vulkan, composition and Metal do not select DXGI latch modes. A requested
     // latch transition must not reset their feedback matching history.
     observation.latched = (feedback.nativeBackend == VrrNativePresentationBackend::Vulkan ||
-                           feedback.nativeBackend == VrrNativePresentationBackend::Composition) ?
+                           feedback.nativeBackend == VrrNativePresentationBackend::Composition ||
+                           feedback.nativeBackend == VrrNativePresentationBackend::Metal) ?
         false : decision.latchedPresentation || feedback.flipProtectionLatched;
     observation.dxgi = feedback.nativeBackend == VrrNativePresentationBackend::Dxgi;
     observation.sampleValid = feedback.latchSampleValid &&

@@ -3,6 +3,7 @@
 #include "../../app/streaming/video/pyrowave/pyrowavecalibrationpolicy.h"
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "Failed line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 
@@ -33,6 +34,37 @@ int main() {
     r = run(2000000, 800000);
     CHECK(tried.front() == 2000000 && r.requestedKbps <= 760000 && r.requestedKbps >= 750000);
     CHECK(!run(500000, 0).stable());
+    // A failed search retains the last floor probe so the UI can name its
+    // actual failure instead of claiming that UDP may be blocked.
+    auto failed = run(500000, 0);
+    CHECK(failed.requestedKbps == minimumKbps && failed.expected == 10000);
+    CHECK(std::string(failed.failureReason()) == "packet loss exceeds the limit");
+    failed = search(500000, maximumKbps, [](int rate) {
+        auto measured = sample(rate, true);
+        measured.delayP99Ms = 20;
+        return measured;
+    }, [] { return false; });
+    CHECK(!failed.stable() && failed.received == failed.expected);
+    CHECK(std::string(failed.failureReason()) == "packet delivery variation exceeds 4 ms");
+    // Jitter without congestion must not hide local format support. Capacity
+    // search still finds a loss boundary, leaves margin and confirms twice.
+    tried.clear();
+    auto capacity = search(500000, maximumKbps, [&](int rate) {
+        tried.push_back(rate);
+        auto measured = sample(rate, rate <= 800000);
+        measured.delayP99Ms = 16;
+        return measured;
+    }, [] { return false; }, false);
+    CHECK(capacity.capacityQualified() && !capacity.stable());
+    CHECK(capacity.requestedKbps >= 750000 && capacity.requestedKbps <= 760000);
+    CHECK(tried.back() == capacity.requestedKbps && tried[tried.size()-2] == capacity.requestedKbps);
+    CHECK(!search(500000, maximumKbps, [](int rate) { return sample(rate, false); },
+                  [] { return false; }, false).capacityQualified());
+    CHECK(!search(500000, maximumKbps, [](int rate) {
+        auto measured = sample(rate, true);
+        measured.delayGrowthMs = 3;
+        return measured;
+    }, [] { return false; }, false).capacityQualified());
     CHECK(run(500000, maximumKbps).requestedKbps == 2850000);
     CHECK(run(minimumKbps, maximumKbps).requestedKbps == 2850000);
     // Ceiling-first search keeps the same 5 Mbps boundary and confirmations,

@@ -44,7 +44,7 @@ static int failures;
     } \
 } while (0)
 
-static char* generateSdp(int format, int compression) {
+static char* generateSdp(int format, int compression, int linkMbps) {
     int length = 0;
     memset(&StreamConfig, 0, sizeof(StreamConfig));
     StreamConfig.width = 2560;
@@ -55,7 +55,7 @@ static char* generateSdp(int format, int compression) {
     StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
     StreamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
     StreamConfig.pyrowaveCompression = compression;
-    StreamConfig.pyrowaveLinkMbps = 1000;
+    StreamConfig.pyrowaveLinkMbps = linkMbps;
     NegotiatedVideoFormat = format;
     RemoteAddr.ss_family = AF_INET;
     AudioEncryptionEnabled = false;
@@ -75,7 +75,7 @@ int main(void) {
     unsigned int i;
 
     for (i = 0; i < sizeof(pyrowaveFormats) / sizeof(pyrowaveFormats[0]); i++) {
-        char* normal = generateSdp(pyrowaveFormats[i], 0);
+        char* normal = generateSdp(pyrowaveFormats[i], 0, 1000);
         if (normal == NULL) continue;
         EXPECT(strstr(normal, "a=x-ss-video[0].pyrowaveFeatures:1 \r\n") != NULL,
                "Normal PyroWave advertises only record framing");
@@ -85,7 +85,7 @@ int main(void) {
                "PyroWave sends the receiver link speed for host pacing");
         free(normal);
 
-        char* compression = generateSdp(pyrowaveFormats[i], 1);
+        char* compression = generateSdp(pyrowaveFormats[i], 1, 1000);
         if (compression == NULL) continue;
         EXPECT(strstr(compression, "a=x-ss-video[0].pyrowaveFeatures:9 \r\n") != NULL,
                "PyroWave compression advertises record framing and compression support");
@@ -94,10 +94,16 @@ int main(void) {
         EXPECT(strstr(compression, "a=x-nv-vqos[0].bitStreamFormat:3 \r\n") != NULL,
                "Compressed keeps the negotiated PyroWave codec");
         free(compression);
+
+        char* unknownLink = generateSdp(pyrowaveFormats[i], 0, 0);
+        if (unknownLink == NULL) continue;
+        EXPECT(strstr(unknownLink, "pyrowaveLinkMbps") == NULL,
+               "An unknown receiver link speed is not advertised");
+        free(unknownLink);
     }
 
     for (i = 0; i < sizeof(fallbackFormats) / sizeof(fallbackFormats[0]); i++) {
-        char* fallback = generateSdp(fallbackFormats[i], 1);
+        char* fallback = generateSdp(fallbackFormats[i], 1, 1000);
         if (fallback == NULL) continue;
         EXPECT(strstr(fallback, "pyrowaveCompression") == NULL,
                "A non-PyroWave codec never opts into compression transport");

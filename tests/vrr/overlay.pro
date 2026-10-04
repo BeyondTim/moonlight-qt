@@ -14,7 +14,7 @@ win32 {
     LIBS += -L$$PWD/../../libs/windows/lib/$$VRR_ARCH -lSDL2 -lSDL2_ttf shell32.lib
 }
 macx:!disable-prebuilts {
-    INCLUDEPATH += $$PWD/../../libs/mac/include
+    INCLUDEPATH += $$PWD/../../libs/mac/include $$PWD/../../libs/mac/include/SDL2
     LIBS += -L$$PWD/../../libs/mac/lib -lSDL2 -lSDL2_ttf
 } else:unix {
     CONFIG += link_pkgconfig

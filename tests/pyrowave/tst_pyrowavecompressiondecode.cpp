@@ -6,7 +6,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include "../../app/streaming/video/pyrowave/pyrowavedecoder.h"
 #include "pyrowavecompression.h"
 namespace {
@@ -152,7 +152,7 @@ bool runCompressionCase(pyrowave_device device, bool chroma444, bool tenBit) {
 }
 #endif
 bool checkPyroWaveCompressionClientDecode(pyrowave_device device) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     bool ok = true;
     for (bool chroma : {false, true}) for (bool depth : {false, true}) ok &= runCompressionCase(device, chroma, depth);
     return ok;

@@ -920,9 +920,9 @@ Flickable {
                           description: qsTr("Half the developer's recommended image bitrate. Uses less bandwidth.") },
                         { text: qsTr("Recommended"), summary: qsTr("Developer choice"), value: PyroWaveCalibrator.Recommended,
                           description: qsTr("The developer's recommended image bitrate for each format.") },
-                        { text: qsTr("Moderate"), summary: qsTr("60% of stable link"), value: PyroWaveCalibrator.Moderate,
-                          description: qsTr("Use up to 60% of the measured stable bandwidth, including overhead.") },
-                        { text: qsTr("Maximum"), summary: qsTr("Full stable budget"), value: PyroWaveCalibrator.Maximum,
+                        { text: qsTr("Moderate"), summary: qsTr("60% of measured link"), value: PyroWaveCalibrator.Moderate,
+                          description: qsTr("Use up to 60% of the measured bandwidth, including overhead.") },
+                        { text: qsTr("Maximum"), summary: qsTr("Full measured budget"), value: PyroWaveCalibrator.Maximum,
                           description: qsTr("Find the highest tested bitrate the connection and this device can sustain, with network headroom.") }
                     ]
                     readonly property bool canContinue: resultsMatch && PyroWaveCalibrator.bandwidthReady
@@ -1341,9 +1341,9 @@ Flickable {
                                 Layout.fillWidth: true
                                 padding: 12
                                 background: Rectangle {
-                                    color: calibrationDialog.canContinue ? "#283b2e" : "#252525"
+                                    color: calibrationDialog.canContinue ? (PyroWaveCalibrator.networkTimingWarning ? "#413824" : "#283b2e") : "#252525"
                                     radius: 8
-                                    border.color: calibrationDialog.canContinue ? "#568260" : "#505050"
+                                    border.color: calibrationDialog.canContinue ? (PyroWaveCalibrator.networkTimingWarning ? "#aa8542" : "#568260") : "#505050"
                                 }
                                 contentItem: RowLayout {
                                     spacing: 12
@@ -1367,8 +1367,8 @@ Flickable {
                                             Layout.fillWidth: true
                                             visible: calibrationDialog.canContinue
                                             wrapMode: Text.Wrap
-                                            color: "#a5d6a7"
-                                            text: qsTr("Stable budget: %1 Mbps · Continue to the decoder test").arg(PyroWaveCalibrator.bandwidthKbps / 1000)
+                                            color: PyroWaveCalibrator.networkTimingWarning ? "#ffd180" : "#a5d6a7"
+                                            text: qsTr("Measured budget: %1 Mbps · Continue to the decoder test").arg(PyroWaveCalibrator.bandwidthKbps / 1000)
                                         }
                                     }
                                 }
@@ -1396,6 +1396,14 @@ Flickable {
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
                                 text: PyroWaveCalibrator.message
+                            }
+                            Label {
+                                objectName: "pyrowaveNetworkTimingWarning"
+                                Layout.fillWidth: true
+                                visible: PyroWaveCalibrator.networkTimingWarning
+                                wrapMode: Text.Wrap
+                                color: "#ffd180"
+                                text: qsTr("Network timing warning: packet-arrival variation exceeds 4 ms and may cause stutter. Format grades measure this device's decode and draw capacity.")
                             }
                             ProgressBar {
                                 Layout.fillWidth: true

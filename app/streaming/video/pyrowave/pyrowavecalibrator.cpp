@@ -26,12 +26,15 @@
 #include <utility>
 #include <vector>
 
-#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32))
+#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32) || defined(Q_OS_DARWIN))
 #include "streaming/video/pyrowave/pyrowavedecoder.h"
 #include "streaming/video/pyrowave/pyrowaveframing.h"
 #include <vulkan/vulkan.h>
 #ifdef Q_OS_LINUX
 #include "streaming/video/pyrowave/pyrowaveplacebo.h"
+#elif defined(Q_OS_DARWIN)
+#include "streaming/video/pyrowave/pyrowavemetal.h"
+#include "streaming/video/pyrowave/pyrowavemetalcalibrator.h"
 #else
 #include "streaming/video/ffmpeg-renderers/d3d11pyrowave.h"
 #include <d3d11_4.h>
@@ -98,7 +101,7 @@ int roundDownKbps(double kbps)
     return int(std::floor(kbps / 5000.0)) * 5000;
 }
 
-#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32))
+#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32) || defined(Q_OS_DARWIN))
 
 constexpr int kResolutions[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080},
 #ifdef Q_OS_LINUX
@@ -202,6 +205,12 @@ struct Renderer {
         pl_log_destroy(&log);
     }
 };
+#elif defined(Q_OS_DARWIN)
+// Decode and the native scaled Metal pass finish serially. Reserve the same
+// conservative quarter-period headroom as the Windows serial check.
+constexpr bool kConcurrentDraw = false;
+constexpr double kPeriodShare = 0.75;
+using Renderer = PyroWaveMetalCalibratorRenderer;
 #else
 // The D3D11 check only waits for decode completion, on the decoding thread,
 // so decoding may use three quarters of each frame period and rendering the
@@ -461,8 +470,13 @@ public:
         config.height = height;
         config.chroma444 = chroma444;
         config.tenBit = hdr;
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_DARWIN)
+#ifdef Q_OS_DARWIN
+        config.vulkanPool = renderer.pool();
+        config.requireSharedOutput = true;
+#else
         config.vulkanPool = renderer.pool.get();
+#endif
         const bool initialized = m_Decoder.initialize(config, nullptr);
 #else
         const bool initialized = m_Decoder.initialize(config, renderer.pool.get());
@@ -835,6 +849,7 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
 {
     if (m_Running || m_Worker) return;
     m_BandwidthReady = false;
+    m_NetworkTimingWarning = false;
     m_LinkCapKbps = 0;
     m_LinkSummary.clear();
     if (bitrateTarget < Minimum || bitrateTarget > Maximum) {
@@ -903,7 +918,7 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
     const int linkMbps = NetworkBuffers::routedWiredLinkMbps(QHostAddress(hostAddress.address()));
     m_LinkSummary = tr("Measuring bandwidth from %1 to this PC…").arg(hostName);
 
-#if !defined(HAVE_PYROWAVE) || (!defined(Q_OS_LINUX) && !defined(Q_OS_WIN32))
+#if !defined(HAVE_PYROWAVE) || (!defined(Q_OS_LINUX) && !defined(Q_OS_WIN32) && !defined(Q_OS_DARWIN))
     Q_UNUSED(displayWidth);
     Q_UNUSED(displayHeight);
     Q_UNUSED(target);
@@ -968,19 +983,27 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
             // Search precision, probe duration and two confirmations are intact.
             link = PyroWaveLink::search(capKbps, capKbps, [&](int kbps) {
                 QMetaObject::invokeMethod(this, [this, kbps] {
-                    m_Message = tr("Testing %1 Mbps including FEC: checking packet loss and delivery stability…").arg(kbps / 1000);
+                    m_Message = tr("Testing %1 Mbps including FEC: measuring throughput, loss and delivery timing…").arg(kbps / 1000);
                     emit changed();
                 }, Qt::QueuedConnection);
                 const auto result = http.probePyroWaveUdp(kbps, packetSize, *cancelled);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "PyroWave UDP probe: %d kbps, sent %u/%u, received %u, loss %.3f%%, worst 100ms %.3f%%, "
-                    "delay p99 %.2f ms, growth %.2f ms: %s", kbps, result.sent, result.expected,
+                    "delay p99 %.2f ms, growth %.2f ms, host duration %.2f ms, receiver read delay p99 %.2f ms, "
+                    "kernel arrivals %d: capacity %s, timing %s (%s)", kbps, result.sent, result.expected,
                     result.received, result.lossPercent, result.worstWindowLossPercent,
-                    result.delayP99Ms, result.delayGrowthMs, result.stable() ? "pass" : "fail");
+                    result.delayP99Ms, result.delayGrowthMs, result.senderMs, result.receiverReadDelayP99Ms,
+                    result.kernelArrivalTimestamps, result.capacityQualified() ? "pass" : "fail",
+                    result.stable() ? "pass" : "fail", result.failureReason());
                 return result;
-            }, [&] { return cancelled->load(); });
-            if (!cancelled->load() && !link.stable()) {
-                throw std::runtime_error("No stable PyroWave rate: excessive packet loss, delayed delivery, or UDP blocked");
+            }, [&] { return cancelled->load(); }, false);
+            if (!cancelled->load() && !link.capacityQualified()) {
+                throw std::runtime_error(QString("No usable PyroWave network budget: %1. Last test %2 Mbps: received %3/%4 packets, "
+                    "loss %5%, delivery variation p99 %6 ms, delay growth %7 ms, host duration %8 ms.")
+                    .arg(QString::fromLatin1(link.failureReason())).arg(link.requestedKbps / 1000)
+                    .arg(link.received).arg(link.expected).arg(link.lossPercent, 0, 'f', 3)
+                    .arg(link.delayP99Ms, 0, 'f', 2).arg(link.delayGrowthMs, 0, 'f', 2)
+                    .arg(link.senderMs, 0, 'f', 2).toStdString());
             }
         }
         catch (const std::exception& e) {
@@ -988,7 +1011,7 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
             const bool stopped = cancelled->load();
             QMetaObject::invokeMethod(this, [this, error, stopped] {
                 m_Message = stopped ? tr("Calibration stopped.") : error;
-                m_LinkSummary = tr("No stable PyroWave bitrate could be recommended.");
+                m_LinkSummary = tr("Calibration could not be completed.");
                 emit changed();
             }, Qt::QueuedConnection);
             return;
@@ -1005,11 +1028,16 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
             m_LinkCapKbps = link.requestedKbps;
             m_Transport = transport;
             m_BandwidthReady = true;
-            m_LinkSummary = tr("%1 → this PC: stable budget %2 Mbps including FEC and headers, with 5% headroom where available. Packet loss %3%; worst 100 ms %4%; delivery variation p99 %5 ms. Critical FEC: %6%. Rates below include overhead; quality uses the remaining image bitrate.")
+            m_NetworkTimingWarning = !link.stable();
+            m_LinkSummary = tr("%1 → this PC: measured throughput budget %2 Mbps including FEC and headers, with 5% headroom where available. Packet loss %3%; worst 100 ms %4%; delivery variation p99 %5 ms. Critical FEC: %6%. Rates below include overhead; quality uses the remaining image bitrate.")
                 .arg(hostName).arg(link.requestedKbps / 1000).arg(link.lossPercent, 0, 'f', 2)
                 .arg(link.worstWindowLossPercent, 0, 'f', 2).arg(link.delayP99Ms, 0, 'f', 1)
                 .arg(transport.critical_fec_percentage);
-            m_Message = tr("Bandwidth test passed. Choose Next to test the decoder.");
+            if (!link.stable()) {
+                m_LinkSummary += tr(" Network timing warning: delivery variation exceeds 4 ms. Format grades below measure this device; network jitter may cause stutter during streaming.");
+            }
+            m_Message = link.stable() ? tr("Bandwidth test passed. Choose Next to test the decoder.") :
+                tr("Throughput test passed with a network timing warning. Choose Next to test the decoder.");
             emit changed();
         }, Qt::QueuedConnection);
     });
@@ -1022,6 +1050,7 @@ void PyroWaveCalibrator::reset()
 {
     cancel();
     m_BandwidthReady = false;
+    m_NetworkTimingWarning = false;
     m_LinkCapKbps = 0;
     m_Results.clear();
     m_Message.clear();
@@ -1060,7 +1089,7 @@ void PyroWaveCalibrator::startDecoderTest(const QString& hostUuid, int bitrateTa
         emit changed();
         return;
     }
-#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32))
+#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32) || defined(Q_OS_DARWIN))
     m_Running = true;
     m_Results.clear();
     m_Message = tr("Stress testing decoder and rendering at %1 FPS…").arg(m_Fps);

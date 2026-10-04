@@ -203,6 +203,20 @@ checks remain unchanged. A replay of one arm cannot model the other arm's
 driver blocking or establish optical tear freedom; that comparison needs fresh
 captures and visual checks on the affected Windows/Linux device.
 
+The Metal worker fixture reports local serial submission IDs, asynchronous
+`DisplayEvent` feedback for the previous submission, and command-buffer
+completion brackets without DXGI query, QPC, fence, or capability fields.
+It verifies native cadence matching across requested latch-mode transitions
+and excludes feedback whose clock uncertainty exceeds 500 us. Set
+`MOONLIGHT_VRR_TEST_EXPORT_METAL_TRACE` to export its schema-5 fixture, then run
+`vrrreplay --require-exact-baseline` or `check_metal_trace_audit.py` with the
+replay executable and fixture paths. A matching `.failed` fixture captures
+preparation failure and drawable cancellation without a native Present. The
+audit checks exact controller replay for both success and failure
+and rejects forged backend, result, ID, event-kind, DXGI, and GPU-ready evidence.
+This fixture does not establish live display refresh behavior or optical
+scanout timing; the strict DXGI raster gate remains unavailable on Metal.
+
 The FPS picker offers native VRR rates and preserves saved custom values; the
 reduced-rate Low Latency VRR recommendation has been removed. The worker no
 longer generates gap-fill repeats when new frames are unavailable.
@@ -1574,6 +1588,49 @@ captures without immutable output retain their historical boundary. Busy-worker
 reconstruction caps a learned idle floor by the current row's observed readiness;
 a long startup wait cannot shift an otherwise unchanged replay. Both contracts
 have deterministic regressions in `tst_vrrreplayconfig`.
+
+## Native macOS Metal and PyroWave integration smoke test
+
+Build this target explicitly after the application has produced
+`build/mac-client/pyrowave/libpyrowave.a`. `CONFIG+=pyrowave` opts into the GPU
+codec cases; the ordinary native target does not compile the codec. Run from
+the repository root:
+
+```sh
+nativeRoot="$PWD"
+mkdir -p build/mac-metal-pyrowave-smoke
+cd build/mac-metal-pyrowave-smoke
+"$nativeRoot/build/vrr-hybrid/qt/6.11.1/macos/bin/qmake" \
+  "$nativeRoot/tests/vrr/metalpresenter.pro" \
+  QMAKE_APPLE_DEVICE_ARCHS=arm64 CONFIG+=release CONFIG-=debug \
+  CONFIG+=pyrowave \
+  "PYROWAVE_STATIC_LIBRARY=$nativeRoot/build/mac-client/pyrowave/libpyrowave.a"
+make -j6
+DYLD_LIBRARY_PATH="$nativeRoot/libs/mac/lib" \
+GRANITE_VULKAN_LIBRARY="$nativeRoot/libs/mac/lib/libMoltenVK.dylib" \
+  ./tst_metalpresenter "$PWD/native-metal-pyrowave.vrrtrace"
+DYLD_LIBRARY_PATH="$nativeRoot/libs/mac/lib" \
+  "$nativeRoot/build/mac-tests/vrr/vrrreplay" \
+  "$PWD/native-metal-pyrowave.vrrtrace" --require-exact-baseline \
+  --output "$PWD/native-metal-pyrowave-baseline.json"
+```
+
+The test opens a temporary native fullscreen window. On a variable display it
+first verifies rejection of windowed and V-sync-disabled VRR, then exercises
+the actual Metal presenter with software and VideoToolbox frames. The two
+combined codec cases encode 128×96 patterns on the GPU and decode to exported
+Metal textures in 4:2:0/8-bit and 4:4:4/10-bit. Their AVFrames have no CPU plane
+data. The presenter waits for asynchronous decode, renders, cancels, prepares
+again, frees the source frame and decoder, and presents the retained drawable.
+A shared-frame fixed/CAMetalDisplayLink case also runs after VRR fallback.
+
+The separate 100-frame worker fixture uses synthetic software frames at 116 FPS
+on the 120 Hz panel and records real command-completion and presented-time
+feedback for exact replay. On a fixed display the adaptive cases are skipped
+after verifying fixed fallback. These tests establish native pipeline behavior;
+the PyroWave GPU round-trip suite covers full-resolution plane equality, while
+live streaming, external-display scanout and sustained performance require
+separate validation.
 
 # Buffer accounting extension (2026-09-18)
 

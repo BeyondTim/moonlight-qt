@@ -180,6 +180,7 @@ SOURCES += \
     backend/identitymanager.cpp \
     backend/nvcomputer.cpp \
     backend/nvhttp.cpp \
+    backend/pyrowaveudpprobe.cpp \
     backend/nvpairingmanager.cpp \
     backend/computermanager.cpp \
     backend/boxartmanager.cpp \
@@ -240,6 +241,7 @@ HEADERS += \
     backend/nvcomputer.h \
     backend/framelimitercapabilities.h \
     backend/nvhttp.h \
+    backend/pyrowaveudpprobe.h \
     backend/nvpairingmanager.h \
     backend/computermanager.h \
     backend/boxartmanager.h \
@@ -483,10 +485,12 @@ macx {
     SOURCES += \
         streaming/video/ffmpeg-renderers/vt_base.mm \
         streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm \
-        streaming/video/ffmpeg-renderers/vt_metal.mm
+        streaming/video/ffmpeg-renderers/vt_metal.mm \
+        streaming/video/ffmpeg-renderers/macdisplaytiming.mm
 
     HEADERS += \
-        streaming/video/ffmpeg-renderers/vt.h
+        streaming/video/ffmpeg-renderers/vt.h \
+        streaming/video/ffmpeg-renderers/macdisplaytiming.h
 }
 discord-rpc {
     message(Discord integration enabled)
@@ -535,13 +539,18 @@ wayland {
 }
 
 # PyroWave decoding runs on Vulkan. Windows shares D3D11 surfaces; Linux
-# presents the decoded planes through the libplacebo Vulkan renderer.
+# presents the decoded planes through libplacebo. macOS exports MoltenVK images
+# as Metal textures so decoding and presentation share the same GPU planes.
 win32:!winrt:contains(QT_ARCH, x86_64):!disable-pyrowave {
     message(PyroWave decoder enabled)
     CONFIG += pyrowave
 }
 linux:contains(QT_ARCH, x86_64):!disable-pyrowave:contains(CONFIG, libplacebo) {
     message(PyroWave decoder enabled)
+    CONFIG += pyrowave
+}
+macx:!disable-prebuilts:!disable-pyrowave {
+    message(PyroWave decoder enabled via MoltenVK and Metal)
     CONFIG += pyrowave
 }
 pyrowave {
@@ -558,6 +567,12 @@ pyrowave {
     linux {
         SOURCES += streaming/video/pyrowave/pyrowaveplacebo.cpp
         HEADERS += streaming/video/pyrowave/pyrowaveplacebo.h
+    }
+    macx {
+        SOURCES += streaming/video/pyrowave/pyrowavemetal.mm \
+                   streaming/video/pyrowave/pyrowavemetalcalibrator.mm
+        HEADERS += streaming/video/pyrowave/pyrowavemetal.h \
+                   streaming/video/pyrowave/pyrowavemetalcalibrator.h
     }
 
     # Only pyrowave.h is included from the vendored tree

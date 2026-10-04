@@ -7,7 +7,10 @@ contains(CONFIG, tests) {
     SUBDIRS += vrr
     SUBDIRS += haptics
     SUBDIRS += pyrowave
-    unix:!macx:packagesExist(sdl2) {
+    macx {
+        controllerNavigation.file = $$PWD/qml/controller-navigation.pro
+        SUBDIRS += controllerNavigation
+    } else:unix:packagesExist(sdl2) {
         controllerNavigation.file = $$PWD/qml/controller-navigation.pro
         SUBDIRS += controllerNavigation
     }

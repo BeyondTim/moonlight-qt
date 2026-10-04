@@ -22,12 +22,38 @@ struct Result {
     double worstWindowLossPercent = 100;
     double delayP99Ms = 0;
     double delayGrowthMs = 0;
+    bool kernelArrivalTimestamps = false;
+    double receiverReadDelayP99Ms = 0;
 
-    bool stable() const {
-        return expected > 0 && sent == expected && received <= sent &&
+    const char* failureReason() const {
+        if (!expected) return "no probe completed";
+        if (sent != expected) return "host did not send every probe packet";
+        if (!received) return "no UDP packets received";
+        if (received > sent) return "invalid received packet count";
+        if (!std::isfinite(senderMs) || !std::isfinite(lossPercent) ||
+            !std::isfinite(worstWindowLossPercent) || !std::isfinite(delayP99Ms) ||
+            !std::isfinite(delayGrowthMs)) return "invalid timing measurement";
+        if (senderMs < durationMs * 0.98 || senderMs > durationMs * 1.02) return "host probe missed its sending duration";
+        if (lossPercent > 0.1) return "packet loss exceeds the limit";
+        if (worstWindowLossPercent > 1.0) return "bursty packet loss exceeds the limit";
+        if (delayP99Ms > 4.0) return "packet delivery variation exceeds 4 ms";
+        if (delayGrowthMs > 2.0) return "packet delivery delay grows by more than 2 ms";
+        return "stable";
+    }
+
+    // Capacity qualification retains loss, sender pacing and queue-growth
+    // limits. Transit jitter is a separate smoothness warning, not proof that
+    // the codec/device is unsupported or that lowering bitrate will help.
+    bool capacityQualified() const {
+        return expected > 0 && sent == expected && received > 0 && received <= sent &&
+               std::isfinite(delayP99Ms) && std::isfinite(delayGrowthMs) &&
                senderMs >= durationMs * 0.98 && senderMs <= durationMs * 1.02 &&
                lossPercent <= 0.1 && worstWindowLossPercent <= 1.0 &&
-               delayP99Ms <= 4.0 && delayGrowthMs <= 2.0;
+               delayGrowthMs <= 2.0;
+    }
+
+    bool stable() const {
+        return capacityQualified() && delayP99Ms <= 4.0;
     }
 };
 
@@ -72,8 +98,12 @@ inline int rounded(double kbps) { return int(kbps / minimumKbps) * minimumKbps; 
 // A final 5% margin is measured twice afresh. Failed confirmation lowers the
 // bracket, so a noisy/high-loss path can never inherit an earlier passing rate.
 template<class Probe, class Cancelled>
-Result search(int targetKbps, int capKbps, Probe probe, Cancelled cancelled)
+Result search(int targetKbps, int capKbps, Probe probe, Cancelled cancelled,
+              bool requireLowJitter = true)
 {
+    const auto qualified = [requireLowJitter](const Result& result) {
+        return requireLowJitter ? result.stable() : result.capacityQualified();
+    };
     const int cap = (std::min)(maximumKbps, rounded(capKbps));
     if (cap < minimumKbps) return {};
     int low = 0, high = cap + minimumKbps;
@@ -81,8 +111,9 @@ Result search(int targetKbps, int capKbps, Probe probe, Cancelled cancelled)
     Result best;
     for (int attempt = 0; attempt < 40 && !cancelled(); ++attempt) {
         const auto result = probe(next);
+        best = result;
         if (cancelled()) return {};
-        if (result.stable()) {
+        if (qualified(result)) {
             best = result;
             low = next;
             if (low == cap || high - low <= minimumKbps) break;
@@ -95,18 +126,18 @@ Result search(int targetKbps, int capKbps, Probe probe, Cancelled cancelled)
             next = (std::max)(minimumKbps, rounded((low + high) / 2.0));
         }
     }
-    if (!low) return {};
+    if (!low) return best;
     next = (std::max)(minimumKbps, rounded(low * 0.95));
     for (int attempt = 0; attempt < 32 && !cancelled(); ++attempt) {
         best = probe(next);
         if (cancelled()) return {};
-        if (best.stable()) {
+        if (qualified(best)) {
             best = probe(next);
-            if (!cancelled() && best.stable()) return best;
+            if (!cancelled() && qualified(best)) return best;
         }
         if (next == minimumKbps) break;
         next = (std::max)(minimumKbps, rounded(next * 0.8));
     }
-    return {};
+    return cancelled() ? Result{} : best;
 }
 } // namespace PyroWaveLink

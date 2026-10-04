@@ -12,8 +12,9 @@ extern "C" {
 }
 
 // Decodes PyroWave frames on Vulkan. Windows shares GPU surfaces with the
-// renderer. Linux decodes on the renderer's own VkDevice into planes it lends
-// (IPyroWaveVulkanPool), or without one reads planar frames back to the CPU.
+// renderer. Linux and macOS decode on the VkDevice supplied by the renderer's
+// IPyroWaveVulkanPool into planes it lends. macOS exports those MoltenVK images
+// to the native Metal presenter. Diagnostics can instead read planes to the CPU.
 // Not thread safe: decode() must be called from one thread. Frames it produces
 // may be freed from any thread.
 class PyroWaveDecoder
@@ -29,6 +30,9 @@ public:
 #ifndef _WIN32
         // Optional; without it frames are read back into system memory
         IPyroWaveVulkanPool* vulkanPool = nullptr;
+        // Production Metal playback requires GPU sharing. Readback remains
+        // available to standalone diagnostics which do not own a presenter.
+        bool requireSharedOutput = false;
 #endif
     };
 

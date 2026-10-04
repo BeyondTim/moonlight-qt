@@ -1662,6 +1662,12 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #endif
 #ifdef Q_OS_DARWIN
         case AV_HWDEVICE_TYPE_VIDEOTOOLBOX:
+            // The adaptive presenter lives in Metal. Use the same renderer
+            // during the startup probe so range/HDR negotiation matches playback.
+            if ((params->enableVrr || params->preferVrrRenderer) &&
+                    params->renderer == StreamingPreferences::RS_AUTO) {
+                return VTMetalRendererFactory::createRenderer(true);
+            }
             // Prefer the libplacebo (on MoltenVK) renderer unless explicitly opted out
 #ifdef HAVE_LIBPLACEBO_VULKAN
             if (params->renderer == StreamingPreferences::RS_AUTO || params->renderer == StreamingPreferences::RS_VULKAN) {
@@ -2290,6 +2296,8 @@ bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
 
 #ifdef Q_OS_WIN32
     m_BackendRenderer = new D3D11VARenderer(0);
+#elif defined(Q_OS_DARWIN)
+    m_BackendRenderer = VTMetalRendererFactory::createRenderer(false);
 #elif defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
     m_BackendRenderer = new PlVkRenderer();
 #else
@@ -2318,6 +2326,15 @@ bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
     config.tenBit = (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) != 0;
 #ifndef Q_OS_WIN32
     config.vulkanPool = m_BackendRenderer->getPyroWaveVulkanPool();
+#ifdef Q_OS_DARWIN
+    // The Mac path requires shared GPU planes; a failed interop setup cannot
+    // silently turn a high-bandwidth GPU codec into CPU readback and upload.
+    config.requireSharedOutput = true;
+    if (config.vulkanPool == nullptr) {
+        reset();
+        return false;
+    }
+#endif
 #endif
 
     m_PyroWave = std::make_unique<PyroWaveDecoder>();
@@ -2851,8 +2868,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                                                        decodeSubmitUs);
                         pacedFrame.setDecodeHoldUs(decodeHoldUs);
 #ifdef HAVE_PYROWAVE
-                        // Shared-surface output (Linux Vulkan, Windows D3D11
-                        // interop) returns at submission, not completion.
+                        // Shared-surface output (Vulkan, D3D11 or Metal interop)
+                        // returns at submission, not completion.
                         if (m_PyroWaveActive) {
                             pacedFrame.setDecoderOutputComplete(
                                 !m_PyroWave->hasAsynchronousOutput());

@@ -5,6 +5,9 @@
 #include "session.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
+#ifdef Q_OS_DARWIN
+#include "video/ffmpeg-renderers/macdisplaytiming.h"
+#endif
 #include "streaming/vrrratepolicy.h"
 #include "backend/richpresencemanager.h"
 #include "streaming/gpuperformancehold.h"
@@ -683,6 +686,14 @@ void Session::snapshotPresentationSettings(SDL_Window* window)
     m_PresentationSettings.smoothVrrFrameTiming = m_Preferences->smoothVrrFrameTiming;
 
     if (requestedVrr) {
+        bool hasAdaptiveDisplay = true;
+#ifdef Q_OS_DARWIN
+        hasAdaptiveDisplay = queryMacDisplayTiming(window).supportsVariableRefresh();
+        if (!hasAdaptiveDisplay) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "VRR disabled: the current Mac display has no variable-refresh range");
+        }
+#endif
         const bool hasAdaptiveHeadroom = hasStrictRefreshRate &&
             VrrRatePolicy::hasAdaptiveHeadroom(m_StreamConfig.fps,
                                                strictRefreshRate);
@@ -701,7 +712,7 @@ void Session::snapshotPresentationSettings(SDL_Window* window)
                         m_StreamConfig.fps, strictRefreshRate);
         }
         if (hasStrictRefreshRate && m_PresentationSettings.effectiveVsync &&
-                hasAdaptiveHeadroom) {
+                hasAdaptiveHeadroom && hasAdaptiveDisplay) {
             m_PresentationSettings.enableVrr = true;
             m_PresentationSettings.effectiveWindowMode = StreamingPreferences::WM_FULLSCREEN_DESKTOP;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -776,6 +787,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // https://github.com/moonlight-stream/moonlight-qt/issues/1211
         // https://github.com/moonlight-stream/moonlight-qt/issues/1218
         SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, shouldUseFullScreenSpaces ? "1" : "0");
+    }
+
+    // SDL caches this hint when its Cocoa video driver starts. Adaptive-Sync
+    // presentation needs native fullscreen, including on an external display;
+    // the saved window preference or notch override must not select the older
+    // borderless path for a requested VRR session.
+    if (m_Preferences->enableVrr && m_Preferences->enableVsync) {
+        SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
     }
 #endif
 
@@ -2446,11 +2465,16 @@ void Session::exec()
 #endif
                 if (m_PresentationSettings.enableVrr && refreshMayHaveChanged) {
                     int currentRefreshRate = 0;
+                    bool adaptiveDisplayAvailable = true;
+#ifdef Q_OS_DARWIN
+                    adaptiveDisplayAvailable = queryMacDisplayTiming(m_Window).supportsVariableRefresh();
+#endif
                     if (!StreamUtils::tryGetDisplayRefreshRate(m_Window,
                                                                currentRefreshRate) ||
-                            currentRefreshRate != m_PresentationSettings.refreshRate) {
+                            currentRefreshRate != m_PresentationSettings.refreshRate ||
+                            !adaptiveDisplayAvailable) {
                         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                    "VRR disabled for this session after display refresh changed or became unavailable; falling back to fixed pacing");
+                                    "VRR disabled for this session after display timing changed or became unavailable; falling back to fixed pacing");
                         m_PresentationSettings.enableVrr = false;
                         forceRecreation = true;
                     }
