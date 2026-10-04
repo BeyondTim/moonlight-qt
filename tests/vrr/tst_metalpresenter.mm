@@ -14,6 +14,7 @@
 
 #include "assertions.h"
 #include <QCoreApplication>
+#include <QCommandLineParser>
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
@@ -105,6 +106,15 @@ AVFrame* makeFrame(AVPixelFormat format)
 int main(int argc, char** argv)
 { @autoreleasepool {
     QCoreApplication application(argc, argv);
+    QCommandLineParser parser;
+    parser.addHelpOption();
+    parser.addPositionalArgument("trace", "Output worker trace (optional).");
+    parser.addOption({"fps", "Worker source frame rate (defaults to display maximum minus four, capped at 116).", "fps"});
+    parser.addOption({"frames", "Number of worker frames (default 100).", "frames", "100"});
+    parser.process(application);
+    bool validFrames = false;
+    const int frameCount = parser.value("frames").toInt(&validFrames);
+    assert(validFrames && frameCount >= 100 && frameCount <= 10000);
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
     assert(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) == 0);
@@ -113,11 +123,16 @@ int main(int argc, char** argv)
         SDL_WINDOW_METAL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SHOWN);
     assert(window != nullptr);
     [NSApp activateIgnoringOtherApps:YES];
+    SDL_ShowCursor(SDL_DISABLE);
     serviceDisplay();
     const auto timing = queryMacDisplayTiming(window);
     const auto indexedTiming = queryMacDisplayTimingForDisplay(SDL_GetWindowDisplayIndex(window));
     assert(timing.hasValidTiming());
     assert(timing.maximumFramesPerSecond == indexedTiming.maximumFramesPerSecond);
+    bool validRate = true;
+    const int workerRate = parser.isSet("fps") ? parser.value("fps").toInt(&validRate) :
+        std::max(1, std::min(116, timing.maximumFramesPerSecond - 4));
+    assert(validRate && workerRate > 0 && workerRate <= timing.maximumFramesPerSecond);
     std::printf("Native display: %d Hz, %.6f-%.6f ms, granularity %.6f ms\n",
         timing.maximumFramesPerSecond, timing.minimumRefreshInterval * 1000,
         timing.maximumRefreshInterval * 1000, timing.displayUpdateGranularity * 1000);
@@ -126,7 +141,7 @@ int main(int argc, char** argv)
     params.window = window;
     params.videoFormat = VIDEO_FORMAT_H264;
     params.width = params.height = 64;
-    params.frameRate = 60;
+    params.frameRate = workerRate;
     params.enableVsync = true;
     params.enableVrr = true;
     std::unique_ptr<IFFmpegRenderer> renderer(VTMetalRendererFactory::createRenderer(false));
@@ -245,25 +260,35 @@ int main(int argc, char** argv)
 
         // Exercise the shared worker against real Metal drawables, retaining a
         // replay-grade trace of its completion waits and delayed display events.
+        SDL_RaiseWindow(window);
+        [NSApp activateIgnoringOtherApps:YES];
+        const uint64_t settleStart = LiGetMicroseconds();
+        while (LiGetMicroseconds() - settleStart < 1000000) serviceDisplay();
+        const bool lowPower = NSProcessInfo.processInfo.lowPowerModeEnabled;
+        std::printf("Native test environment: fullscreen %d, active %d, focused %d, low power %d\n",
+            queryMacDisplayTiming(window).nativeFullscreen, NSApp.active,
+            !!(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS), lowPower);
+        bool focusLost = false;
         QTemporaryDir traceDirectory;
         assert(traceDirectory.isValid());
-        const QString tracePath = argc > 1 ? QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath() :
+        const QString tracePath = !parser.positionalArguments().isEmpty() ?
+            QFileInfo(parser.positionalArguments().first()).absoluteFilePath() :
             traceDirectory.filePath("native-metal.vrrtrace");
         qputenv("MOONLIGHT_VRR_TRACE", QFile::encodeName(tracePath));
         qputenv("MOONLIGHT_VRR_DEEP_TRACE", "1");
         PacerTelemetry telemetry;
         VrrSessionConfig config;
         config.displayRefreshHz = timing.maximumFramesPerSecond;
-        config.streamRateHz = std::min(116, timing.maximumFramesPerSecond - 4);
+        config.streamRateHz = workerRate;
         {
             VrrPacingWorker worker(presenter, config, &telemetry);
             assert(worker.start());
             const uint64_t sourceStart = LiGetMicroseconds();
-            constexpr int frameCount = 100;
             for (int index = 0; index < frameCount; ++index) {
                 const uint64_t dueUs = sourceStart + uint64_t(index) * 1000000 / config.streamRateHz;
                 while (LiGetMicroseconds() < dueUs) {
                     SDL_PumpEvents();
+                    if (!(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) focusLost = true;
                     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0005, false);
                     if (LiGetMicroseconds() + 1000 < dueUs) SDL_Delay(1);
                 }
@@ -277,7 +302,7 @@ int main(int argc, char** argv)
             const uint64_t drainStart = LiGetMicroseconds();
             for (;;) {
                 const auto stats = telemetry.snapshot();
-                if (stats.vrrPresentedFrames + stats.vrrPacingDroppedFrames == frameCount) break;
+                if (stats.vrrPresentedFrames + stats.vrrPacingDroppedFrames == uint64_t(frameCount)) break;
                 assert(LiGetMicroseconds() - drainStart < 3000000);
                 serviceDisplay();
                 SDL_Delay(1);
@@ -286,7 +311,6 @@ int main(int argc, char** argv)
         qunsetenv("MOONLIGHT_VRR_TRACE");
         qunsetenv("MOONLIGHT_VRR_DEEP_TRACE");
         const auto workerStats = telemetry.snapshot();
-        assert(workerStats.vrrPresentedFrames >= 90);
         assert(workerStats.vrrCadenceIntervals > 0);
         assert(workerStats.vrrPresentFailedFrames == 0);
         std::printf("Native worker: %llu presented, %llu dropped, %llu display intervals; trace %s\n",
@@ -294,6 +318,11 @@ int main(int argc, char** argv)
             (unsigned long long)workerStats.vrrPacingDroppedFrames,
             (unsigned long long)workerStats.vrrCadenceIntervals,
             qPrintable(tracePath));
+        std::fflush(stdout);
+        std::printf("Native test lost focus: %d\n", focusLost);
+        std::fflush(stdout);
+        assert(!focusLost);
+        assert(workerStats.vrrPresentedFrames >= uint64_t(frameCount) * 9 / 10);
 
         AVFrame* frame = makeFrame(AV_PIX_FMT_YUV420P);
         assert(presenter->prepareFrame(frame, 0).prepared);

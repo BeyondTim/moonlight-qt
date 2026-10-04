@@ -1,6 +1,6 @@
 # Mac client: VRR and PyroWave
 
-Source baseline: `470299b1` plus the Mac port (2026-10-04). This is a native
+Source baseline: `41d9df5c` plus the drawable-backpressure correction (2026-10-04). This is a native
 macOS client build. Windows release and ChaseShare deployment procedures remain
 separate. See [architecture.md](../architecture.md) for ownership, clocks, and
 the shared timing policy.
@@ -32,6 +32,9 @@ The Metal presenter keeps display synchronization enabled and calls
 with the native minimum interval. This constrains the previous drawable's
 visible duration. Drawable `presentedTime` callbacks supply OS presentation
 evidence, separately from submission timing and physical panel measurements.
+The synchronized layer uses three drawable resources so the displayed image
+and its submitted successor do not block preparation of the next frame.
+The shared worker still controls admission and the submission target.
 
 ## PyroWave GPU path
 
@@ -128,8 +131,8 @@ is needed for a fresh recursive checkout.
 
 ## Validation boundaries
 
-On this Apple M5 Pro, 17 deterministic VRR suites and seven CPU PyroWave/haptics
-suites pass. Native presenter, shared-GPU reconstruction and headless calibration
+Initial port validation on this Apple M5 Pro passed 17 deterministic VRR suites
+and seven CPU PyroWave/haptics suites. Native presenter, shared-GPU reconstruction and headless calibration
 checks are separate from those hardware-free regressions.
 
 The staged arm64 app passes Cocoa `--help` with `DYLD_LIBRARY_PATH` unset and
@@ -181,3 +184,52 @@ changing image content. The target is
 the round-trip test. A complete host/network calibration sweep has not been run.
 Runtime validation is arm64; the codec static library cross-compiles for x86_64,
 but Intel runtime behavior has not been tested.
+
+The first live external LG TV test at 4K90 PyroWave 4:4:4 10-bit rendered only
+71.02 FPS and dropped 21.05% of frames through client pacing. Its two-resource
+layer spent 9.01 ms on average acquiring drawables. A host-free 600-frame test
+reproduced the resource starvation; three drawable resources restored all 600
+submissions with zero drops and passed exact replay. Native display timestamps
+still showed an 8.33/16.67 ms grid instead of uniform 11.11 ms intervals.
+This fixes the reproduced resource bottleneck; external adaptive cadence fails
+the native gate. The user confirmed Variable/Adaptive mode is already selected
+and the TV remains near 118 FPS. The live capture's strict replay
+gate also rejects five queue-depth semantic errors despite exact timing replay;
+it cannot establish strict A/B proof.
+The drawable-fix validation passes the combined native PyroWave/Metal smoke,
+exact native replay, bundle signature/dependency/help checks, and 14 of the 15
+hardware-free suites in `build/mac-tests/vrr`. The unchanged worker suite fails
+queue-overflow and trace lifecycle expectations on repeated runs; this is not
+a completely green regression result. Investigation artifacts and the cadence
+failure are retained in `build/mac-vrr-first-live`.
+
+Follow-up 90 FPS tests explicitly requested a display-link frame rate and a
+fitted 11.111 ms Metal minimum duration. Both still failed cadence matching and
+were reverted. A standalone Cocoa/Metal display-link control also ran at the
+120 Hz callback cadence despite its 90 FPS preference. These are investigation
+results, not a completed fix or evidence that VRR was disabled in settings.
+Direct versus composited Metal presentation remains to be established.
+
+The continuation found an environmental limit: the Metal HUD reported Low Power
+Mode, composited presentation, and about 60 presented FPS during a 90 FPS request.
+For cadence checks on this Mac, use Automatic power mode and keep native
+fullscreen focused; an advertised 40-120 Hz range does not prove that the current
+power policy allows that rate. Initialization now logs Low Power Mode and warns
+when it is enabled. Moonlight does not change the system power setting.
+
+After the user selected Automatic power mode, a settled, focused native smoke
+presented all 900 frames with zero drops and passed exact replay. Display events
+varied around 11.11 ms, and the user observed the TV's numerical refresh rate
+vary toward 90 Hz in the native control. The strict uniform-cadence gate still
+failed (44.71% within 500 us, 2.111 ms p95 error); it must not be interpreted as a
+binary VRR-enabled detector. Passing the source period to Metal gave similar
+results and was reverted. Live streaming and physical cadence remain separate
+validation steps.
+
+The continuation rebuilt the app and diagnostics, passed all 17 hardware-free
+regression suites plus replay CLI startup, then reran the final production
+native smoke: 900/900 frames, zero drops, no focus loss, Low Power Mode off, and
+exact replay passed. The final strict cadence gate still failed (46.40% within
+500 us, 2.340 ms p95 interval error). The staged test bundle passed signature,
+dependency, and isolated help checks. These results establish native resource
+throughput and recorded execution integrity, not perfectly even physical scanout.

@@ -217,6 +217,39 @@ and rejects forged backend, result, ID, event-kind, DXGI, and GPU-ready evidence
 This fixture does not establish live display refresh behavior or optical
 scanout timing; the strict DXGI raster gate remains unavailable on Metal.
 
+The native `tst_metalpresenter` smoke accepts `--fps N` and `--frames N`
+(100-10000, default 100), plus its existing optional output trace path. Run it
+from its build directory so shader lookup resolves. Use an extended 90 FPS run
+on a continuous 120 Hz display to expose drawable starvation that a short
+near-maximum-rate run can miss. The harness requires at least 90% submission
+throughput and exercises real software/VideoToolbox surfaces, cancellation,
+suspension, teardown, and fixed fallback; `CONFIG+=pyrowave` also exercises
+shared PyroWave surfaces. A passing smoke does not establish adaptive cadence.
+The harness settles fullscreen before frame delivery, logs activation, focus,
+and Low Power Mode, and rejects focus loss. Keep the test fullscreen for its
+duration. Low Power Mode can limit presentation despite an advertised variable
+refresh range; record the power state alongside any hardware cadence result.
+
+After the native smoke, independently gate a constant-rate capture with:
+
+```sh
+python3 tests/vrr/check_metal_cadence.py /absolute/path/native-metal.vrrtrace \
+    --fps 90 --output build/metal-cadence.json
+```
+
+This requires at least 90% OS display-event coverage after 32 warmup submissions,
+at least 32 consecutive matched intervals, and at least 95% of those intervals
+within 500 us of the requested period. It uses drawable presentation events,
+never CPU submission timing, and exits nonzero when coverage or cadence fails.
+It is for constant-rate native hardware smokes, not variable-rate gameplay or
+optical panel measurements. The 2026-10-04 LG TV result fails this gate even
+after three drawable resources restore zero-drop submission throughput.
+With Automatic power and fullscreen held focused, a later 900-frame production
+smoke submitted every frame, passed exact replay, and produced display intervals
+around 11.11 ms, but still failed the strict uniformity threshold. The TV's
+numerical refresh rate varied toward 90 Hz in the native control. This gate
+scores interval regularity; a failure alone does not establish that VRR is off.
+
 The FPS picker offers native VRR rates and preserves saved custom values; the
 reduced-rate Low Latency VRR recommendation has been removed. The worker no
 longer generates gap-fill repeats when new frames are unavailable.

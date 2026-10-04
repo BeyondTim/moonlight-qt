@@ -5,8 +5,8 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Current source review baseline: `db540fe4` plus the macOS Metal VRR and
-PyroWave port in this worktree (2026-10-04). The upstream two-step PyroWave calibration targets, planned-present timing
+Current source review baseline: `41d9df5c` plus the macOS drawable-backpressure
+correction in this worktree (2026-10-04). The upstream two-step PyroWave calibration targets, planned-present timing
 judgements and below-VRR-floor pause are included. The shared customizable VRR
 settings, Reduce judder readiness bound, above-target shrinkage correction,
 and per-interval excess scoring remain active. Deployment and live smoothness
@@ -21,8 +21,9 @@ display maximum. Metal keeps synchronized presentation enabled and requests
 the native minimum visible duration for each drawable. OS-reported drawable
 presentation timestamps are diagnostics, not optical scanout measurements.
 See section 11 and [Mac build and use](docs/macos-vrr-pyrowave.md) for the
-backend contract, dependencies, and validation boundaries. The external display
-has not been exercised by this port.
+backend contract, dependencies, and validation boundaries. The first external
+LG TV capture exposed drawable starvation and failed native cadence matching;
+the resource correction alone does not establish working display adaptation.
 
 The 2026-10-03 scheduling work also adds dedicated-video-thread priority
 requests and CPU-pause polling in the bounded final deadline wait, described
@@ -3453,9 +3454,15 @@ alone cannot establish a variable-refresh range. Playback also requires native
 Cocoa fullscreen; a windowed or older borderless path falls back to fixed pacing.
 
 Active Metal VRR uses a persistent `CAMetalLayer` with
-`displaySyncEnabled=YES`, two drawable slots, and drawable acquisition timeout
+`displaySyncEnabled=YES`, three drawable slots, and drawable acquisition timeout
 enabled. `CAMetalDisplayLink` is bypassed only while the shared VRR worker owns
-cadence. Preparation acquires a drawable, encodes the existing video/color
+cadence. A synchronized layer can retain both its displayed drawable and a
+submitted successor; the third resource lets early preparation proceed without
+waiting for the compositor to retire either. The worker still prepares one
+image at a time and submits at its existing target, with no additional playout
+queue. Startup logging records drawable dimensions, bounds, count, and
+transaction mode alongside the native display range.
+Preparation acquires a drawable, encodes the existing video/color
 conversion and overlays, commits the render command buffer, then observes its
 completion with a 50 ms CPU wait bound. Acquisition is a separately measured
 native backpressure cost; that 50 ms bound applies to command completion, not
@@ -3501,6 +3508,66 @@ with correlation uncertainty. Shared diagnostics match that identity and keep
 missing events as gaps; requested latch transitions do not reset Metal's fixed
 native presentation mode. This is compositor evidence, not optical confirmation
 of panel cadence, tearing, or end-to-end latency.
+
+First external-display investigation (2026-10-04): clean-close capture
+`20261004-222950-425-c89ef903-1755-412c-bf82-cf0abaaea792/Moonlight.vrrtrace`
+(SHA-256 `415d1cb8f8914cafa4c3b05d4ebc7d784fd0289dc4babe1d3d76312716baee19`)
+requested 4K90 PyroWave 4:4:4 10-bit on the LG TV's advertised 40-120 Hz range.
+The log reported 90.19 incoming FPS, 71.02 rendered FPS, and 21.05% client pacing
+drops. Recorded drawable acquisition averaged 9.01 ms, versus 1.45 ms rendering;
+native display intervals were predominantly 16.67 ms. Trace sequence/footer
+integrity passes and all controller targets and submissions replay exactly,
+but five queue-depth semantic errors reject the strict baseline gate. This is
+recorded execution evidence, not strict counterfactual A/B proof.
+
+A host-free 600-frame native smoke at 90 FPS on the same display reproduced
+401 submissions and 199 drops with two resources. Three resources produced
+600 submissions and zero drops and passed exact replay. The observed display
+intervals still alternated around 8.33/16.67 ms; successful submission throughput
+must not be described as adaptive display-cadence success. The constant-rate
+`check_metal_cadence.py` hardware gate independently checks matched OS display
+events and rejects that result. The user confirmed that macOS and the TV are
+already in VRR mode; asking to enable VRR again does not resolve this failure.
+
+Follow-up native experiments explicitly requested 90 FPS through a
+`CADisplayLink`, and separately passed the controller's fitted 11.111 ms source
+period to `presentAfterMinimumDuration:`. Neither produced uniform 90 Hz OS
+presentation events. The fitted-period run submitted all 600 frames, matched
+99.65% of steady display events, but only 0.35% of consecutive intervals were
+within 500 us of the requested period; acquisition rose to 4.63 ms on average.
+Both experiments were reverted. A standalone Cocoa/Metal control using
+`CAMetalDisplayLink`, a 90 FPS preferred range, and its supplied drawables also
+received predominantly 120 Hz callbacks. A display-link preference is a
+best-effort request, not proof of adaptive scanout, and its drawables reject
+`presentAfterMinimumDuration:`; mixing the two APIs throws a native exception.
+These experiments do not establish the root cause or justify a new production
+timing policy. The remaining investigation is native presentation eligibility,
+including direct versus composited presentation; optical panel validation also
+remains outstanding. The resource correction must not be presented as a VRR fix.
+
+Continuation on 2026-10-04 separated environmental throttling from native cadence.
+The user observed the TV's numerical refresh rate vary toward 90 Hz in the native
+control. The Metal HUD then exposed Low Power Mode, composited presentation, and
+about 60 presented FPS during a 90 FPS request; the control's display events were
+predominantly 16.67 ms. The user changed AC power mode to Automatic. A fullscreen
+settle and a focus check were also necessary: an earlier unsettled smoke dropped
+245 of 900 frames and cannot establish steady fullscreen performance.
+
+With Automatic power, fullscreen settled, and no focus loss, the production
+presenter submitted all 900 frames with zero drops and passed exact replay.
+Recorded display intervals were distributed around 11.11 ms rather than a fixed
+120 Hz grid. The strict constant-cadence gate still failed: 44.71% of consecutive
+events were within 500 us, with 2.111 ms p95 interval error. Passing the fitted
+source period to Metal also submitted all 900 frames but yielded similar cadence
+(47.97%, 2.249 ms p95); that experiment was reverted. Neither gate failure alone
+proves VRR is inactive, nor does zero-drop throughput prove uniform scanout.
+Optical validation and an end-to-end stream remain separate from this smoke.
+
+Initialization now logs Low Power Mode and warns when it is enabled. The advertised
+`NSScreen` range remains a capability snapshot, not proof that the current power
+policy permits the requested presentation rate. The native smoke logs fullscreen,
+activation, focus, and power state, waits for fullscreen to settle before the
+worker run, and rejects focus loss during frame delivery.
 
 ### Linux Vulkan presentation
 

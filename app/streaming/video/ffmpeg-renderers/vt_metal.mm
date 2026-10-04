@@ -1071,14 +1071,31 @@ public:
             m_MetalLayer.displaySyncEnabled = m_VrrEnabled || params->enableVsync;
             m_MetalLayer.opaque = YES;
             if (m_VrrEnabled) {
-                m_MetalLayer.maximumDrawableCount = 2;
+                // A synchronized layer can retain both the displayed drawable
+                // and the submitted successor. Keep a third slot available for
+                // early preparation; two slots make nextDrawable wait for the
+                // compositor and turn that backpressure into missed VRR targets.
+                // The worker still prepares only one frame at a time and owns
+                // the submission deadline, so this is no extra playout queue.
+                m_MetalLayer.maximumDrawableCount = 3;
                 m_MetalLayer.allowsNextDrawableTimeout = YES;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Metal VRR layer: %.0fx%.0f pixels, bounds %.0fx%.0f, %lu drawables, transaction %d",
+                            m_MetalLayer.drawableSize.width, m_MetalLayer.drawableSize.height,
+                            m_MetalLayer.bounds.size.width, m_MetalLayer.bounds.size.height,
+                            (unsigned long)m_MetalLayer.maximumDrawableCount, m_MetalLayer.presentsWithTransaction);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "Metal VRR display: maximum %d Hz, interval %.3f-%.3f ms, granularity %.3f ms",
                             m_DisplayTiming.maximumFramesPerSecond,
                             m_DisplayTiming.minimumRefreshInterval * 1000,
                             m_DisplayTiming.maximumRefreshInterval * 1000,
                             m_DisplayTiming.displayUpdateGranularity * 1000);
+                const bool lowPower = NSProcessInfo.processInfo.lowPowerModeEnabled;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Metal VRR power state: low power %d", lowPower);
+                if (lowPower) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "Low Power Mode may limit adaptive presentation despite the advertised display refresh range");
+                }
             }
         }
 
