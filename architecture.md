@@ -9,7 +9,8 @@ Current source review baseline: `9b7fa143` plus customizable VRR timing
 settings (2026-10-01), plus the 2026-09-30 Reduce judder
 readiness-bound and interval-buffer attribution changes, plus the 2026-10-01
 above-target shrinkage correction and per-interval excess scoring in this
-worktree. Deployment and live
+worktree, plus the PyroWave calibration targets and ceiling-first search
+recovered on 2026-10-04 from the 2026-10-03 local stash. Deployment and live
 smoothness must be verified separately from this source description.
 
 The 2026-10-03 scheduling work also adds dedicated-video-thread priority
@@ -354,11 +355,50 @@ stall can land in any run.
 The default bitrate and calibration's author recommendation use the same
 35 dB calculation rounded up to 5 Mbps, including the HDR allowance. The
 default no longer applies a separate 900 Mbps cap and needs no calibration.
-Calibration (2026-10-02, reviewed against client `e2fd1c57` and host
+Calibration (2026-10-02, reviewed against client `92119295` and host
 `6d8fc5ac` plus these changes) requires an online paired PyroWave host advertising
-UDP probe v1 and wire budget v1. The selected bitrate is tested first with a
-2-second paced UDP probe; passing rates grow by 25% until a failure or the
-physical-link/3 Gbps limit. Bisection finds the boundary in 5 Mbps steps. A
+UDP probe v1 and wire budget v1. Calibrate PyroWave opens a two-step modal card.
+Step one selects the host and bitrate target and runs only the bandwidth test.
+The 2026-10-04 UI follow-up gives the four target cards equal widths and short
+budget descriptions, highlights the next useful action, and groups connection
+progress and the confirmed budget in a status panel. The first screen is 480
+logical pixels tall where space permits, with controller hints below the panel.
+Four target cards default to Recommended: Minimum requests half the author's
+recommended image bitrate (rounded down to the 5 Mbps step, with a 5 Mbps
+minimum), Recommended requests the author's full image guide, Moderate uses at
+most 60% of freshly confirmed stable wire bandwidth, and Maximum uses the full
+confirmed budget. All four respect network, packet/FEC overhead, frame capacity
+and device limits.
+
+Explicit left/right handlers select and focus the target cards; controller
+up/down maps through Tab/Shift+Tab to the host and test controls. Targets are
+locked while a test runs. Next is enabled only after the network worker exits
+successfully and the selected host/target still matches the tested combination.
+It starts a separate decoder/render stress-test worker on step two, using only
+that calibration's confirmed budget, FPS, display size and transport policy.
+The backend also checks host/target identity before starting the decoder.
+Failed or cancelled bandwidth cannot advance; closing the card cancels the
+worker and invalidates its budget. Stop allows a running test to finish its
+current transfer/frame. Back from step two returns to target selection once
+the worker stops; cancellation requires a fresh bandwidth test.
+
+Step two shows progress and the format grid. Choices become selectable after
+the decoder worker finishes, with focus moving to the first available format.
+Up/down navigation stays within a chroma column, left/right changes chroma while
+retaining HDR/SDR, unsupported choices are skipped, and scrolling follows the
+focused choice and window resizing. Focused format cards have an explicit outline.
+Detailed explanations are under About results; valid slow formats remain
+selectable and dimmed. Results from another host or target are hidden and cannot
+be applied. The UI was exercised at 1280x800 and 800x600 using injected SDL
+controller-button events through the production navigation dispatcher and a
+staged calibration fixture; that does not establish physical controller or
+live-host calibration behavior.
+
+The network search starts with a 2-second paced UDP probe at its bounded
+ceiling. For Moderate and Maximum that ceiling is the smaller known endpoint
+link speed, capped at 3 Gbps; for Minimum and Recommended it is also limited to
+the largest target in the format matrix, with room for applied bitrate rounding
+and the final 5% margin. A failed ceiling is bisected to 5 Mbps precision. A
 candidate must have <=0.1% overall loss, <=1% loss in every 100 ms window,
 <=4 ms p99 relative transit variation, <=2 ms growth, and complete/on-time host
 sending. The chosen rate leaves 5% margin where possible and passes two fresh
@@ -371,10 +411,16 @@ Calibration converts the confirmed total wire rate to image bitrate using the
 host's critical FEC percentage, minimum parity, the selected packet size, packet
 headers/rounding, and audio/control reserve. The shared bandwidth formula only
 reserves parity for one critical block; adaptive detail parity consumes spare
-cadence budget within the same total. GPU probes begin at the author's image
-recommendation, climb by 50% up to the network/frame-capacity bound, and refine
-a failure with three bisections. If the initial rate fails, the existing floor
-probe and minimum 10% GPU saving rule still govern reducing image quality.
+cadence budget within the same total. GPU probes begin at the selected image target within the
+network/frame-capacity bound. A passing target needs one complete measurement;
+there is no upward staircase. If a bandwidth target fails, the author's guide
+is tested as a lower bracket when applicable. Otherwise the existing floor
+probe and minimum 10% GPU saving rule govern whether reducing image quality
+is useful. At most six bitrate bisections refine a passing/failing device
+bracket; every passing candidate retains the full timed run. The p99 threshold,
+warmup, 300-frame/three-second minimum, system-stall retry, and two fresh UDP
+confirmations are unchanged. Slow rows retain the actual target's timing when
+no lower rate works, rather than attaching floor timing to the target bitrate.
 Applied rates include FEC and headers; the quality estimate and tooltip use
 image Mbps. Reduced/low quality stays visible even on slow-format rows.
 `pyroWaveQualityDb()` retains its existing regression/inversion semantics.
@@ -393,8 +439,23 @@ backlogged live against a 6.7 ms test mean): green ("Any display") at a p99
 cost of at most 60% of the period, yellow ("Needs VRR") up to 80%, orange
 ("Needs VRR · Smooth mode", the large buffer) up to the full period, and red
 ("Can't keep up") beyond it. Clicking a format applies the codec, resolution, chroma, HDR and the
-bitrate shown, and turns off automatic bitrate. The upward search adds fresh measurements; the former approximately 100 s
-116 FPS sweep timing no longer describes a complete calibration.
+bitrate shown, and turns off automatic bitrate. Every format is freshly tested;
+no cached samples or preliminary passes replace the complete measurements.
+Run duration depends on the chosen target and the number of device/link failures;
+the former fixed "about two minutes" UI estimate is removed.
+
+Local verification (2026-10-02, Deck idle): a matched 120 FPS GPU-only sweep
+at a 950 Mbps confirmed wire budget and 1280x800 render target fell from
+28.258 s on `92119295` to 14.018 s with the ceiling-first Maximum search.
+All 20 formats retained the same selected image/wire rates and keep-up verdicts;
+p99 timings and margin tiers remain fresh measurements and can vary between
+runs. Minimum, Recommended and Moderate completed all 20 formats in 12.476,
+13.278 and 12.829 s respectively. Each retained the complete timed measurement.
+The application build, deterministic policy/budget tests, and production QML
+selector/default checks passed. These times exclude UDP, pairing/HTTP setup
+and real host encoding. UDP search speed is covered by deterministic probe-count
+tests; complete live calibration and gameplay stability are not established
+by this GPU benchmark.
 
 Why this shape, on the Deck (Van Gogh, 4K HDR10 target, 116 FPS): decode cost
 follows resolution and chroma, not bitrate. Decode alone for 4K 4:4:4 10-bit
@@ -769,6 +830,16 @@ The timing controls support gamepad Tab/Shift-Tab focus navigation and left/righ
 adjustment, including when a numeric text field has focus. Preset and PyroWave
 calibration-host popups use `AutoResizingComboBox`, switching the gamepad to
 arrow/Return navigation while open and restoring UI navigation on close.
+The calibration host resolves its target-card focus on each closed-menu Tab
+event, leaving popup arrows to Qt. Its former unconditional Down handler
+stole focus from the open menu. Left/right shortcuts change a combo selection
+only while its popup is closed; open-menu confirmation and cancellation retain
+Qt's native behavior. A plain opaque popup background also keeps the list
+readable with Qt Quick software rendering.
+The SDL dispatcher retains each controller button's key and modifiers until
+release, even if opening/closing a popup changes navigation mode during the
+press. Otherwise Return-down can become Space-up and reopen a confirmed menu.
+Pending mappings are cleared on disable and when stale events are flushed.
 Reconnect after changing timing values.
 
 Initial interval calibration requires at least 500 ms of contiguous coverage

@@ -465,9 +465,25 @@ IPv6/encrypted streaming budget. HTTPS returns XML `expected`, `sent`, and
 packets, and previous probes cannot inflate delivery. Sequence IDs tolerate
 reordering; a 100 ms drain still charges tail delay against the send schedule.
 
-Calibration starts at the selected bitrate (bounded by known routed wired link
-speeds and the 3 Gbps UI limit), grows by 25% while passing, then bisects the
-passing/failing bracket to 5 Mbps. A pass requires all planned packets sent,
+Calibration uses two screens. Step one contains the host selector, four target
+cards and bandwidth test/stop controls. Controller left/right selects a target;
+opening the card starts no test. Next remains disabled until a successful fresh
+network test finishes for the selected host and target. Next starts decoder and
+rendering stress testing on step two, using that same in-session confirmed wire
+budget. Format choices become available when stress testing finishes. Closing
+calibration invalidates the budget; a cancelled test requires fresh bandwidth
+measurement. Changing host or target blocks results for another combination.
+
+Calibration offers four targets: Minimum is half the developer's recommended
+image bitrate rounded down to 5 Mbps (at least 5 Mbps), Recommended is the full
+image recommendation, Moderate allows 60% of measured stable wire bandwidth,
+and Maximum uses the full stable budget. Applied rates include FEC and overhead;
+Moderate's 60% includes those costs.
+
+The UDP search starts at the ceiling bounded by known routed endpoint link
+speeds and the 3 Gbps UI limit. For Minimum and Recommended, the ceiling also
+stops at the largest quality target in the matrix, allowing applied rounding
+and the 5% confirmation margin. Failed ceilings are bisected to 5 Mbps. A pass requires all planned packets sent,
 no more than 0.1% aggregate loss or 1% loss in any 100 ms window, p99 transit
 variation at most 4 ms, delay growth at most 2 ms, and sender duration within
 2% of the requested duration. These are calibration policy thresholds, not FEC
@@ -476,10 +492,15 @@ and measured twice afresh. Failed confirmation reduces the rate by 20% and
 retests; persistent loss, blocked UDP, malformed responses, or an unsupported
 host do not produce a rate. Cancellation abandons the current result.
 
-Each GPU format starts at the author's image recommendation within that
-confirmed wire budget, then increases image bitrate until it reaches the budget
-or device overload. Three bisections refine the device boundary; the existing
-lower-quality/device test remains for formats that fail at their initial rate.
+Each GPU format tests its chosen image target directly within that confirmed
+wire budget. A passing ceiling stops the search; no lower successful probes are
+needed first. After a failure, the author guide can establish a lower bracket
+for bandwidth targets. The existing lower-quality floor probe and 10% GPU-cost
+saving check govern recovery below the guide. At most six bitrate bisections
+refine the device boundary. Every passing candidate uses the same full timed
+measurement as before (at least 300 frames or three seconds of frames, p99),
+with the same warmup and system-stall retry. UDP duration, loss/delay thresholds,
+5 Mbps search precision and two fresh confirmations are unchanged.
 Results show the applied total Mbps, visible reduced/low quality, and image Mbps
 in the details. Format measurements use the selected packet size and respect
 the sender's frame capacity. Rates round up to 5 Mbps only when they still fit

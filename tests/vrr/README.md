@@ -57,6 +57,20 @@ They cover preset resets, custom detection, numeric entry, bounded adjustments,
 focus traversal, and calibration-host popup select/cancel. The mock modules
 replace only the platform navigation/theme singletons, not the tested controls.
 
+The SDL dispatcher regression test uses isolated preferences and injected
+controller events, with mapping downloads stubbed out. On Linux with SDL2:
+
+```sh
+mkdir -p build/controller-navigation
+cd build/controller-navigation
+qmake ../../tests/qml/controller-navigation.pro
+make
+QT_QPA_PLATFORM=offscreen SDL_VIDEODRIVER=dummy ./tst_controllernavigation
+```
+
+It checks that popup-triggered mode changes keep press/release keys paired,
+including modifiers, face-button remapping and simultaneous controllers.
+
 Historical policy implementations remain available through explicit captured
 controller parameters; session configuration no longer selects the legacy queue-policy
 A/B arm. The user-facing diagnostic checkbox only enables tracing; it cannot

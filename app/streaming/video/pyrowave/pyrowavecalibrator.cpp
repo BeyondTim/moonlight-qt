@@ -51,8 +51,6 @@ constexpr double kReducedQualityDb = 32.0;
 // The regression's lowest level. A format that falls behind at this bitrate
 // falls behind at any useful one.
 constexpr double kFloorQualityDb = PYROWAVE_REGRESSION_MIN_PSNR_HVS_M_H;
-// Refine the boundary after a device overload.
-constexpr int kBitrateSearchSteps = 3;
 // Decoded frames waiting to be drawn, as a stream's decoder thread runs ahead
 // of its renderer.
 constexpr size_t kQueuedFrames = 3;
@@ -68,10 +66,6 @@ constexpr double kCostPercentile = 0.99;
 // beyond it, only a large VRR buffer does.
 constexpr double kAnyDisplayShare = 0.6;
 constexpr double kVrrShare = 0.8;
-// A lower bitrate is only searched when it cuts the GPU time per frame by at
-// least this share; otherwise passing at it would be run-to-run noise at the
-// edge of the frame period, bought with picture quality.
-constexpr double kMinimumBitrateSaving = 0.1;
 
 struct Sample {
     int width = 0;
@@ -87,6 +81,7 @@ struct Sample {
     // The bitrate was lowered below the cap so this device keeps up
     bool deviceLimited = false;
     int guideKbps = 0;
+    int targetKbps = 0; // Requested image bitrate before network/device limits.
     int bitrateKbps = 0; // Applied total wire budget, including FEC.
     int imageKbps = 0;
     double qualityDb = 0;
@@ -104,6 +99,12 @@ int roundDownKbps(double kbps)
 }
 
 #if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32))
+
+constexpr int kResolutions[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080},
+#ifdef Q_OS_LINUX
+                                  {1280, 800},
+#endif
+                                  {1280, 720}};
 
 #ifdef Q_OS_LINUX
 // Decoding and drawing run on separate threads, overlapping on the GPU, and
@@ -652,12 +653,11 @@ private:
     QString m_Error;
 };
 
-// Start at the author's recommendation, then search up to the measured link cap
-// at which the kCostPercentile frame still fits the frame period. If the top bitrate
-// misses, the floor is tried; if that keeps up, bisection on the quality scale
-// finds the highest bitrate that does.
+// Test the selected target directly, lowering it only when fresh measurements
+// establish a useful reduction in device cost.
 Sample calibrateFormat(pyrowave_device device, Renderer& renderer, int width, int height, int fps,
-                       bool chroma444, bool hdr, int linkCapKbps, const pyrowave::bandwidth::transport_t& transport,
+                       bool chroma444, bool hdr, int linkCapKbps, PyroWaveCalibration::Target target,
+                       const pyrowave::bandwidth::transport_t& transport,
                        const std::atomic<bool>& cancelled)
 {
     Sample sample;
@@ -666,31 +666,21 @@ Sample calibrateFormat(pyrowave_device device, Renderer& renderer, int width, in
     sample.chroma444 = chroma444;
     sample.hdr = hdr;
     sample.guideKbps = pyroWaveRecommendedKbps(width, height, fps, chroma444, hdr);
-    // Match Vibeshine max_frame_bytes(): reserve one block for critical FEC.
-    const int frameCapacityBytes = (transport.critical_fec_percentage > 0 ? 3000 : 4000) *
-                                  (transport.packetsize - 16) - 8;
-    const int imageCapKbps = roundDownKbps((std::min)(
-        pyrowave::bandwidth::image_kbps(linkCapKbps, fps, transport), frameCapacityBytes * fps / 125.0));
+    const int wireCapKbps = PyroWaveCalibration::wireTarget(target, linkCapKbps);
+    const int imageCapKbps = PyroWaveCalibration::imageCapacity(wireCapKbps, fps, transport);
     if (imageCapKbps < 5000) {
         sample.error = QStringLiteral("Not enough stable bandwidth after FEC and packet overhead");
         return sample;
     }
-    int topKbps = (std::min)(sample.guideKbps, imageCapKbps);
-    sample.linkLimited = imageCapKbps < sample.guideKbps;
+    sample.targetKbps = PyroWaveCalibration::imageTarget(target, sample.guideKbps,
+                                                        PyroWaveLink::maximumKbps);
+    const int topKbps = PyroWaveCalibration::imageTarget(target, sample.guideKbps, imageCapKbps);
+    if (target > PyroWaveCalibration::Recommended) sample.targetKbps = topKbps;
+    sample.linkLimited = topKbps < (target <= PyroWaveCalibration::Recommended ?
+                                   sample.targetKbps : sample.guideKbps);
     const auto wireKbps = [&](int imageKbps) {
-        // Round up the applied budget; leave room for that rounding in the cap.
-        return int(std::ceil(pyrowave::bandwidth::total_kbps(imageKbps, fps, transport) / 5000)) * 5000;
+        return PyroWaveCalibration::roundUp(pyrowave::bandwidth::total_kbps(imageKbps, fps, transport));
     };
-    // The inverse reserves a full critical block, so cap the image again using
-    // the forward budget rather than ever rounding above the tested wire rate.
-    int usableCapKbps = imageCapKbps;
-    while (usableCapKbps >= 5000 && wireKbps(usableCapKbps) > linkCapKbps) usableCapKbps -= 5000;
-    if (usableCapKbps < 5000) {
-        sample.error = QStringLiteral("Not enough stable bandwidth after FEC and packet overhead");
-        return sample;
-    }
-    topKbps = (std::min)(topKbps, usableCapKbps);
-    sample.linkLimited = topKbps < sample.guideKbps;
     const auto quality = [&](int kbps) {
         return pyroWaveQualityDb(width, height, fps, chroma444, hdr, kbps);
     };
@@ -715,86 +705,28 @@ Sample calibrateFormat(pyrowave_device device, Renderer& renderer, int width, in
         }
         return probe;
     };
-    Probe best = measure(topKbps);
-    if (!best.ok) {
-        sample.error = best.error;
+    const int floorKbps = roundDownKbps(pyroWaveKbpsForQuality(width, height, fps, chroma444, hdr,
+                                                             kFloorQualityDb));
+    const auto selected = PyroWaveCalibration::searchDevice(topKbps, sample.guideKbps, floorKbps,
+        measure, [&](int kbps) { return tester.probe(kbps, true); }, keepsUp,
+        [&] { return cancelled.load(); });
+    if (!selected.cost.ok) {
+        sample.error = selected.cost.error;
         return sample;
     }
     sample.valid = true;
-    int bestKbps = topKbps;
-    if (keepsUp(best)) {
-        int failedKbps = 0;
-        while (bestKbps < usableCapKbps && !cancelled.load()) {
-            const int nextKbps = (std::min)(usableCapKbps,
-                (std::max)(bestKbps + 5000, roundDownKbps(bestKbps * 1.5)));
-            const Probe next = measure(nextKbps);
-            if (!keepsUp(next)) { failedKbps = nextKbps; break; }
-            best = next;
-            bestKbps = nextKbps;
-        }
-        for (int step = 0; failedKbps && step < kBitrateSearchSteps && !cancelled.load(); ++step) {
-            const int middleKbps = roundDownKbps((bestKbps + failedKbps) / 2.0);
-            if (middleKbps <= bestKbps) break;
-            const Probe middle = measure(middleKbps);
-            if (keepsUp(middle)) { best = middle; bestKbps = middleKbps; }
-            else failedKbps = middleKbps;
-        }
-        sample.deviceLimited = failedKbps != 0;
-    }
-    if (!keepsUp(best)) {
-        const int floorKbps = roundDownKbps(pyroWaveKbpsForQuality(width, height, fps, chroma444, hdr,
-                                                                   kFloorQualityDb));
-        // Still selectable: a lower bitrate doesn't help, so it keeps the top one
-        const auto cantKeepUp = [&](const Probe& probe) {
-            sample.imageKbps = topKbps;
-            sample.bitrateKbps = wireKbps(topKbps);
-            sample.qualityDb = quality(topKbps);
-            sample.frameMs = probe.frameMs;
-            sample.load = probe.load;
-            return sample;
-        };
-        if (floorKbps >= topKbps) {
-            return cantKeepUp(best);
-        }
-        const Probe floorCost = tester.probe(floorKbps, true);
-        if (!floorCost.ok || floorCost.meanMs > best.meanMs * (1.0 - kMinimumBitrateSaving)) {
-            return cantKeepUp(best);
-        }
-        const Probe floor = floorCost.overloaded ? floorCost : measure(floorKbps);
-        if (!keepsUp(floor)) {
-            return cantKeepUp(floor.ok ? floor : best);
-        }
-        sample.deviceLimited = true;
-        best = floor;
-        bestKbps = floorKbps;
-        double passingDb = kFloorQualityDb;
-        double failingDb = quality(topKbps);
-        for (int step = 0; step < kBitrateSearchSteps; ++step) {
-            const double middleDb = (passingDb + failingDb) / 2;
-            const int kbps = roundDownKbps(pyroWaveKbpsForQuality(width, height, fps, chroma444, hdr, middleDb));
-            if (kbps <= bestKbps || kbps >= topKbps) break;
-            const Probe middle = measure(kbps);
-            if (keepsUp(middle)) {
-                passingDb = middleDb;
-                best = middle;
-                bestKbps = kbps;
-            }
-            else {
-                failingDb = middleDb;
-            }
-        }
-    }
-    sample.keepsUp = true;
-    sample.share = best.frameMs / availableMs;
-    sample.imageKbps = bestKbps;
-    sample.bitrateKbps = wireKbps(bestKbps);
-    sample.qualityDb = quality(bestKbps);
-    sample.frameMs = best.frameMs;
-    sample.load = best.load;
+    sample.keepsUp = keepsUp(selected.cost);
+    sample.deviceLimited = selected.deviceLimited;
+    sample.share = selected.cost.frameMs / availableMs;
+    sample.imageKbps = selected.imageKbps;
+    sample.bitrateKbps = wireKbps(selected.imageKbps);
+    sample.qualityDb = quality(selected.imageKbps);
+    sample.frameMs = selected.cost.frameMs;
+    sample.load = selected.cost.load;
     return sample;
 }
 
-QString runSweep(int fps, int displayWidth, int displayHeight, int linkCapKbps,
+QString runSweep(int fps, int displayWidth, int displayHeight, int linkCapKbps, PyroWaveCalibration::Target target,
                  const pyrowave::bandwidth::transport_t& transport,
                  const std::atomic<bool>& cancelled, const std::function<void(const Sample&)>& report)
 {
@@ -809,17 +741,12 @@ QString runSweep(int fps, int displayWidth, int displayHeight, int linkCapKbps,
             error = QStringLiteral("Could not create a GPU renderer for PyroWave calibration");
         }
         else {
-            const int resolutions[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080},
-#ifdef Q_OS_LINUX
-                                          {1280, 800},
-#endif
-                                          {1280, 720}};
-            for (const auto& resolution : resolutions) {
+            for (const auto& resolution : kResolutions) {
                 for (bool chroma444 : {true, false}) {
                     for (bool hdr : {true, false}) {
                         if (cancelled.load()) break;
                         const Sample sample = calibrateFormat(device, renderer, resolution[0], resolution[1],
-                                                              fps, chroma444, hdr, linkCapKbps, transport, cancelled);
+                                                              fps, chroma444, hdr, linkCapKbps, target, transport, cancelled);
                         // A format cut short by cancellation has no result
                         if (cancelled.load()) break;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -876,6 +803,7 @@ QVariantMap toMap(const Sample& sample)
             {QStringLiteral("linkLimited"), sample.linkLimited},
             {QStringLiteral("deviceLimited"), sample.deviceLimited},
             {QStringLiteral("guideKbps"), sample.guideKbps},
+            {QStringLiteral("targetKbps"), sample.targetKbps},
             {QStringLiteral("bitrateKbps"), sample.bitrateKbps},
             {QStringLiteral("imageKbps"), sample.imageKbps},
             {QStringLiteral("qualityDb"), sample.qualityDb},
@@ -903,9 +831,19 @@ void PyroWaveCalibrator::cancel()
 }
 
 void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid, int fps,
-                               int displayWidth, int displayHeight, int targetKbps)
+                               int displayWidth, int displayHeight, int bitrateTarget)
 {
-    if (m_Running || (m_Worker && m_Worker->isRunning())) return;
+    if (m_Running || m_Worker) return;
+    m_BandwidthReady = false;
+    m_LinkCapKbps = 0;
+    m_LinkSummary.clear();
+    if (bitrateTarget < Minimum || bitrateTarget > Maximum) {
+        m_Results.clear();
+        m_Message = tr("Choose a valid bitrate target first.");
+        emit changed();
+        return;
+    }
+    const auto target = static_cast<PyroWaveCalibration::Target>(bitrateTarget);
     if (fps < 10 || fps > 240) {
         m_Results.clear();
         m_Message = tr("Choose a valid frame rate first.");
@@ -968,10 +906,16 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
 #if !defined(HAVE_PYROWAVE) || (!defined(Q_OS_LINUX) && !defined(Q_OS_WIN32))
     Q_UNUSED(displayWidth);
     Q_UNUSED(displayHeight);
+    Q_UNUSED(target);
     m_Results.clear();
     m_Message = tr("Local PyroWave calibration requires a supported GPU decoder.");
     emit changed();
 #else
+    m_Fps = fps;
+    m_DisplayWidth = displayWidth;
+    m_DisplayHeight = displayHeight;
+    m_Target = bitrateTarget;
+    m_HostUuid = hostUuid;
     m_Running = true;
     m_Results.clear();
     m_Message = tr("Testing host-to-client bandwidth…");
@@ -979,9 +923,9 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
 
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
     m_Cancel = cancelled;
-    m_Worker = QThread::create([this, fps, displayWidth, displayHeight, linkMbps,
+    m_Worker = QThread::create([this, fps, linkMbps,
                                 hostAddress, hostHttpsPort, hostCertificate, hostName,
-                                useTrueUid, targetKbps, packetSize, cancelled] {
+                                useTrueUid, target, packetSize, cancelled] {
         int hostLinkMbps = 0;
         PyroWaveLink::Result link;
         pyrowave::bandwidth::transport_t transport;
@@ -1005,7 +949,24 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
             int capKbps = PyroWaveLink::maximumKbps;
             if (hostLinkMbps > 0) capKbps = (std::min)(capKbps, int((std::min)(hostLinkMbps, 3000) * 1000));
             if (linkMbps > 0) capKbps = (std::min)(capKbps, int((std::min)(linkMbps, 3000) * 1000));
-            link = PyroWaveLink::search(targetKbps, capKbps, [&](int kbps) {
+            // Quality targets need no capacity search above the largest image
+            // recommendation in the matrix. Allow the existing 5% headroom.
+            if (target <= PyroWaveCalibration::Recommended) {
+                int neededKbps = 0;
+                for (const auto& resolution : kResolutions) {
+                    for (bool chroma444 : {true, false}) for (bool hdr : {true, false}) {
+                        const int guide = pyroWaveRecommendedKbps(resolution[0], resolution[1], fps, chroma444, hdr);
+                        const int image = PyroWaveCalibration::imageTarget(target, guide,
+                            PyroWaveCalibration::imageCapacity(capKbps, fps, transport));
+                        neededKbps = (std::max)(neededKbps,
+                            PyroWaveCalibration::qualityProbeCeiling(image, fps, transport));
+                    }
+                }
+                capKbps = (std::min)(capKbps, (std::max)(5000, neededKbps));
+            }
+            // Starting at the bounded ceiling avoids a slow upward staircase.
+            // Search precision, probe duration and two confirmations are intact.
+            link = PyroWaveLink::search(capKbps, capKbps, [&](int kbps) {
                 QMetaObject::invokeMethod(this, [this, kbps] {
                     m_Message = tr("Testing %1 Mbps including FEC: checking packet loss and delivery stability…").arg(kbps / 1000);
                     emit changed();
@@ -1026,7 +987,6 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
             const QString error = QString::fromUtf8(e.what());
             const bool stopped = cancelled->load();
             QMetaObject::invokeMethod(this, [this, error, stopped] {
-                m_Running = false;
                 m_Message = stopped ? tr("Calibration stopped.") : error;
                 m_LinkSummary = tr("No stable PyroWave bitrate could be recommended.");
                 emit changed();
@@ -1035,49 +995,98 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
         }
         if (cancelled->load()) {
             QMetaObject::invokeMethod(this, [this] {
-                m_Running = false;
                 m_Message = tr("Calibration stopped.");
                 emit changed();
             }, Qt::QueuedConnection);
             return;
         }
-        const int linkCapKbps = link.requestedKbps;
-        QMetaObject::invokeMethod(this, [this, fps, hostName, link, transport] {
+        QMetaObject::invokeMethod(this, [this, hostName, link, transport, cancelled] {
+            if (cancelled->load()) return;
+            m_LinkCapKbps = link.requestedKbps;
+            m_Transport = transport;
+            m_BandwidthReady = true;
             m_LinkSummary = tr("%1 → this PC: stable budget %2 Mbps including FEC and headers, with 5% headroom where available. Packet loss %3%; worst 100 ms %4%; delivery variation p99 %5 ms. Critical FEC: %6%. Rates below include overhead; quality uses the remaining image bitrate.")
                 .arg(hostName).arg(link.requestedKbps / 1000).arg(link.lossPercent, 0, 'f', 2)
                 .arg(link.worstWindowLossPercent, 0, 'f', 2).arg(link.delayP99Ms, 0, 'f', 1)
                 .arg(transport.critical_fec_percentage);
-            m_Message = tr("Timing each format on this device at %1 FPS…").arg(fps);
+            m_Message = tr("Bandwidth test passed. Choose Next to test the decoder.");
             emit changed();
         }, Qt::QueuedConnection);
-        const QString error = runSweep(fps, displayWidth, displayHeight, linkCapKbps, transport, *cancelled,
-                                       [this](const Sample& sample) {
+    });
+    watchWorker();
+    m_Worker->start();
+#endif
+}
+
+void PyroWaveCalibrator::reset()
+{
+    cancel();
+    m_BandwidthReady = false;
+    m_LinkCapKbps = 0;
+    m_Results.clear();
+    m_Message.clear();
+    m_LinkSummary.clear();
+    emit changed();
+}
+
+void PyroWaveCalibrator::watchWorker()
+{
+    QThread* worker = m_Worker;
+    const auto cancelled = m_Cancel;
+    connect(worker, &QThread::finished, this, [this, worker, cancelled] {
+        if (m_Worker == worker) {
+            m_Worker = nullptr;
+            m_Running = false;
+            if (cancelled->load()) {
+                m_BandwidthReady = false;
+                m_Message = tr("Test stopped. Test bandwidth again to continue.");
+            }
+            emit changed();
+        }
+        worker->deleteLater();
+    });
+}
+
+void PyroWaveCalibrator::startDecoderTest(const QString& hostUuid, int bitrateTarget)
+{
+    if (m_Running || m_Worker) return;
+    if (!m_BandwidthReady || hostUuid != m_HostUuid || bitrateTarget != m_Target) {
+        m_Message = tr("Test bandwidth for this host and target before continuing.");
+        emit changed();
+        return;
+    }
+    if (Session::get() != nullptr) {
+        m_Message = tr("Finish the current stream before testing the decoder.");
+        emit changed();
+        return;
+    }
+#if defined(HAVE_PYROWAVE) && (defined(Q_OS_LINUX) || defined(Q_OS_WIN32))
+    m_Running = true;
+    m_Results.clear();
+    m_Message = tr("Stress testing decoder and rendering at %1 FPS…").arg(m_Fps);
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_Cancel = cancelled;
+    const int fps = m_Fps, width = m_DisplayWidth, height = m_DisplayHeight, cap = m_LinkCapKbps;
+    const auto target = static_cast<PyroWaveCalibration::Target>(m_Target);
+    const auto transport = m_Transport;
+    emit changed();
+    m_Worker = QThread::create([this, fps, width, height, cap, target, transport, cancelled] {
+        const QString error = runSweep(fps, width, height, cap, target, transport, *cancelled,
+                                      [this, cancelled](const Sample& sample) {
             const QVariantMap result = toMap(sample);
-            QMetaObject::invokeMethod(this, [this, result] {
+            QMetaObject::invokeMethod(this, [this, result, cancelled] {
+                if (cancelled->load()) return;
                 m_Results.append(result);
                 emit changed();
             }, Qt::QueuedConnection);
         });
-        const bool stopped = cancelled->load();
-        QMetaObject::invokeMethod(this, [this, error, stopped] {
-            m_Running = false;
-            if (!error.isEmpty()) {
-                m_Message = error;
-            }
-            else if (stopped) {
-                m_Message = tr("Calibration stopped.");
-            }
-            else {
-                m_Message = tr("Done. Click a format to use it with the bitrate shown.");
-            }
+        QMetaObject::invokeMethod(this, [this, error, cancelled] {
+            if (cancelled->load()) return;
+            m_Message = error.isEmpty() ? tr("Stress test complete. Select a format to apply it.") : error;
             emit changed();
         }, Qt::QueuedConnection);
     });
-    QThread* worker = m_Worker;
-    connect(worker, &QThread::finished, this, [this, worker] {
-        if (m_Worker == worker) m_Worker = nullptr;
-        worker->deleteLater();
-    });
+    watchWorker();
     m_Worker->start();
 #endif
 }

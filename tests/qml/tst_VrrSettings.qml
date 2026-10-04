@@ -24,12 +24,14 @@ Item {
         id: host
         y: 820; width: 420
         textRole: "name"
+        KeyNavigation.tab: afterHost
         model: ListModel {
             ListElement { name: "Host A" }
             ListElement { name: "Host B" }
             ListElement { name: "Host C" }
         }
     }
+    Button { id: afterHost; x: 440; y: 820; text: "Continue" }
     TestCase {
         name: "VrrSettings"
         when: windowShown
@@ -106,6 +108,24 @@ Item {
             tryCompare(host.popup, "visible", false)
             compare(host.currentIndex, 1)
             compare(SdlGamepadKeyNavigation.uiNavMode, true)
+        }
+        function test_popup_does_not_apply_sideways_navigation() {
+            host.forceActiveFocus()
+            keyClick(Qt.Key_Space)
+            tryCompare(host.popup, "opened", true)
+            keyClick(Qt.Key_Down)
+            compare(host.highlightedIndex, 1)
+            keyClick(Qt.Key_Right)
+            compare(host.currentIndex, 0)
+            keyClick(Qt.Key_Left)
+            compare(host.currentIndex, 0)
+            verify(host.popup.visible)
+            keyClick(Qt.Key_Escape)
+            tryCompare(host.popup, "visible", false)
+            compare(host.currentIndex, 0)
+            verify(host.activeFocus)
+            keyClick(Qt.Key_Tab)
+            verify(afterHost.activeFocus)
         }
         function test_controller_focus_order() {
             var names = ["vrrPreset", "vrrBuffer", "vrrTarget", "vrrHistory", "vrrTolerance"]

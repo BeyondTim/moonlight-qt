@@ -259,6 +259,7 @@ HEADERS += \
     streaming/gpuperformancehold.h \
     streaming/video/amddecodepolicy.h \
     streaming/video/pyrowave/pyrowavecalibrator.h \
+    streaming/video/pyrowave/pyrowavecalibrationpolicy.h \
     streaming/video/pyrowave/pyrowavebandwidth.h \
     streaming/video/pyrowave/pyrowavelinkpolicy.h \
     streaming/video/pyrowave/pyrowavebitrate.h \
