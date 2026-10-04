@@ -35,12 +35,27 @@ returns to normal size on smaller outputs. The chart refreshes at 10 Hz while it
 is shown and does not require recording.
 
 Below the Smoothness line, **Present timing issues (30s)** gives the share of
-display intervals whose spacing differs from the spacing of the matching
-submissions by more than the tolerance, as a percentage and count. That is the
-timing added after submission, the same thing the magenta lane shows. It is
-kept out of Smoothness and never grows the buffer, because more buffering cannot
-correct it. Smoothness only reflects timing the buffer can fix. The line reads
-**unavailable** without current OS display feedback.
+display intervals the display made uneven: the on-screen spacing missed the
+planned spacing by more than the tolerance, and by more than the submitted
+spacing did. A display that smooths out uneven submissions (for example by
+queueing frames) is not blamed, and nothing faster than the panel's maximum
+refresh is expected. It is kept out of Smoothness and never grows the buffer,
+because more buffering cannot correct it. Smoothness only reflects timing the
+buffer can fix. A GPU that cannot finish its work in time (high GPU decode or
+rendering time in the stats) also shows up here. **Hitches** counts intervals
+at least one whole frame worse on screen than they were submitted, and
+**Worst** is the largest such delay in the window. A few large stalls are very
+visible but barely change the percentage.
+
+Hitches that start at the host (the game or host capture stalling) are not
+present timing issues: in the frametime graph they spike the Planned, Client and
+Display lanes together.
+
+Below about 50 fps the panel is under its adaptive-refresh range and the GPU
+driver repeats frames on its own schedule, so the line reads **paused below VRR
+range** instead of blaming the display; scoring resumes 250 ms after the stream
+is back above it. The line reads **unavailable** without current OS display
+feedback.
 
 If magenta jumps while the other lanes stay flat on an AMD GPU under Linux, try
 **High-performance GPU power while streaming** in the video settings. It holds the

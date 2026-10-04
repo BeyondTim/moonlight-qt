@@ -3676,20 +3676,48 @@ missing presentation is a gap, never one long interval. Planned intervals
 include buffer steps, which therefore appear as matching planned and submission
 spikes.
 
-Present timing issues (2026-10-03): `Vrr13::PresentTiming` counts, over a rolling
-30 s window ending at the newest observation, display intervals whose spacing
-differs from the matching submission spacing by more than the interval tolerance
-after subtracting both samples' uncertainty. The controller feeds it from
-`notePresentation()` with matched `DisplayEvent` samples only; the prediction
-callback now passes the matched submission time. Only adjacent submitted frames
-with feedback for both form an interval; drops, missing feedback, feedback-mode
-changes and rebases start a new sequence. The result rides in
-`IntervalBuffer::Stats::present` for the stats overlay
-(`Present timing issues (30s)`, or unavailable after 1 s without feedback). It
-is diagnostic only: production revision 9 scores Smoothness from submission
-intervals and keeps native-hitch adaptation off, so display misses neither lower
-Smoothness nor grow, hold or release the buffer. Targets, buffer policy, trace
-schema and exact replay are unchanged.
+Present timing issues (2026-10-04): `Vrr13::PresentTiming` counts, over a rolling
+30 s window ending at the newest scored interval, display intervals that the
+display path made uneven. The plan is each frame's original scanout time
+(`decision.originalScanoutUs`, which `PresentationPrediction` already keeps per
+pending submission and now passes to its callback with the submission time).
+For adjacent frames, the display error is |displayed interval − max(planned
+interval, display period)| after subtracting both samples' uncertainty, and the
+submit error is |submitted interval − planned interval|. An interval counts when
+the display error exceeds the interval tolerance and exceeds the submit error by
+more than the tolerance. Displays that absorb uneven submissions by queueing are
+therefore not blamed, and neither is spacing held at the panel's fastest
+refresh. A hitch is a counted interval whose added error is at least one planned
+frame (and at least one display period). The window also keeps the worst added
+error. A few large present stalls barely move the percentage: on the
+2026-10-04 10:35 4K PyroWave capture, five on-time submissions reached the
+screen about 25 ms late, which is 0.03% of intervals. The overlay therefore
+reports `Hitches` and `Worst` beside it. When the source period or the submitted interval exceeds
+`vrrFloorLatchGapUs` (20 ms, the controller's existing LFC assumption), the
+panel may be repeating frames on the driver's low-framerate-compensation
+schedule. Scoring then pauses for that interval and for 250 ms afterwards,
+because the driver leaves that mode based on its own average frame time.
+
+An earlier latency-baseline definition (display − max(submit + minimum recent
+latency, previous display + period)) reported 98% on a 4K PyroWave stream. That
+pipeline's submit-to-display latency spans 7–23 ms because frames queue behind
+GPU work, so the minimum baseline made almost every frame look late. Measured
+with the current definition:
+- 2026-10-03 22:56 mixed-rate Deck capture: 0.2% at 91+ fps, 2.0% at 61–90,
+  paused below about 50 fps.
+- 2026-10-04 1440p PyroWave: 3.3%.
+- 2026-10-04 overloaded 4K PyroWave (31% client drops, 10 ms GPU preparation):
+  36%.
+- Matched clip replays: GPU `auto` 38–51%, sysfs `high` 5.1%, stable-pstate PEAK
+  7.6%.
+
+The result rides in `IntervalBuffer::Stats::present` for the overlay. It shows a
+percentage when there are fresh scored intervals, `paused below VRR range` when
+only paused intervals are fresh, and otherwise unavailable. It is diagnostic only:
+production revision 9 scores Smoothness from submission intervals and keeps
+native-hitch adaptation off. Display misses therefore neither lower Smoothness
+nor grow, hold or release the buffer. Targets, buffer policy, trace schema and
+exact replay are unchanged.
 
 This is available during ordinary VRR streams without tracing.
 `TimingGraphHistory` keeps 256 observations, allocated once when the pacer is

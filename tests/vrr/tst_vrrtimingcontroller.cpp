@@ -6698,41 +6698,107 @@ void testLateFrameRecoveryWithoutQueueBacklog()
 
 void testPresentTiming()
 {
-    Vrr13::PresentTiming timing;
-    uint64_t frame = 1;
-    // Display spacing equal to submission spacing is clean even when the
-    // display latency is large; only added spacing error counts.
-    for (; frame <= 100; ++frame)
-        timing.observe(frame, frame * 10000, frame * 10000 + 20000, 0, frame * 10000 + 20000, 1750);
+    using Timing = Vrr13::PresentTiming;
+    const Timing::Limits limits{500, 8333, 10000, 20000};
+    Timing timing;
+    uint64_t frame = 1, planned = 1000000, submitted = 1000000, presented = 0;
+    const auto present = [&](uint64_t plan, uint64_t submitOffset, uint64_t latency, uint64_t uncertainty = 0,
+                             const Timing::Limits& with = Timing::Limits{500, 8333, 10000, 20000}) {
+        planned += plan;
+        submitted = planned + submitOffset;
+        presented = submitted + latency;
+        timing.observe({frame++, submitted, presented, planned, uncertainty, presented}, with);
+    };
+    // A constant submit-to-display latency is clean even when large.
+    for (int i = 0; i < 100; ++i) present(10000, 0, 20000);
     expect(timing.stats().intervals == 99 && timing.stats().misses == 0,
            "constant post-submission latency must not be a present timing issue");
-    // One late presentation stretches one interval and shortens the next.
-    timing.observe(frame, frame * 10000, frame * 10000 + 24000, 0, frame * 10000 + 24000, 1750); ++frame;
-    timing.observe(frame, frame * 10000, frame * 10000 + 20000, 0, frame * 10000 + 20000, 1750); ++frame;
-    expect(timing.stats().intervals == 101 && timing.stats().misses == 2 &&
-               timing.stats().errorTotalUs == 8000,
-           "a late presentation must count its stretched and shortened intervals");
-    // Uncertainty is subtracted before the tolerance comparison.
-    timing.observe(frame, frame * 10000, frame * 10000 + 21800, 600, frame * 10000 + 21800, 1750); ++frame;
-    expect(timing.stats().misses == 2, "uncertain display time must not create a miss");
+    // A late presentation after on-time submissions makes both of its
+    // intervals uneven on screen.
+    present(10000, 0, 24000);
+    present(10000, 0, 20000);
+    expect(timing.stats().misses == 2 && timing.stats().addedTotalUs == 8000 &&
+               timing.stats().hitches == 0 && timing.stats().worstAddedUs == 4000,
+           "a late presentation must count the intervals it made uneven");
+    // A display that queues uneven submissions and shows them at the planned
+    // spacing is not blamed for the latency changes.
+    timing.breakSequence();
+    for (uint64_t offset : {0, 3000, 5000, 1000, 4000, 0}) present(10000, offset, 25000 - offset);
+    expect(timing.stats().misses == 2, "a display that absorbs uneven submissions must not be blamed");
+    // Display spacing cannot be shorter than the panel's fastest refresh, so
+    // a compressed plan shown at that refresh is not an issue.
+    for (int i = 0; i < 4; ++i) {
+        planned += 6000; submitted = planned; presented += 8333;
+        timing.observe({frame++, submitted, presented, planned, 0, presented}, limits);
+    }
+    expect(timing.stats().misses == 2, "spacing limited by the panel's maximum refresh must not be blamed");
+    // An on-time submission shown one refresh late is an issue, after
+    // subtracting timestamp uncertainty.
+    timing.breakSequence();
+    present(10000, 0, 20000);
+    present(10000, 0, 28333);
+    expect(timing.stats().misses == 3, "a missed refresh after an on-time submission must be counted");
+    // A presentation a whole frame or more late is a hitch; the percentage
+    // alone would hide it among many intervals.
+    timing.breakSequence();
+    present(10000, 0, 20000);
+    present(10000, 0, 46000);
+    expect(timing.stats().misses == 4 && timing.stats().hitches == 1 &&
+               timing.stats().worstAddedUs == 26000,
+           "a presentation a frame or more late must be reported as a hitch");
+    timing.breakSequence();
+    present(10000, 0, 20000);
+    present(10000, 0, 28333);
+    present(10000, 0, 20000);
+    present(10000, 0, 20700, 300);
+    expect(timing.stats().misses == 6, "the catch-up after a missed refresh is also uneven on screen");
+    present(10000, 0, 20000, 300);
+    expect(timing.stats().misses == 6 && timing.stats().hitches == 1,
+           "uncertain display time must not create a miss");
+    // Below the panel's adaptive-refresh floor the driver repeats frames on its
+    // own schedule; those intervals are paused rather than blamed.
+    const auto scored = timing.stats().intervals;
+    const Timing::Limits belowFloor{500, 8333, 33333, 20000};
+    present(33333, 0, 20000, 0, belowFloor);
+    present(8600, 0, 28700, 0, belowFloor);
+    present(24700, 0, 20000, 0, belowFloor);
+    expect(timing.stats().intervals == scored && timing.stats().misses == 6 &&
+               timing.stats().lastPausedUs == presented,
+           "intervals below the adaptive-refresh floor must pause scoring");
+    // The driver keeps its repeat refreshes for a while after the floor is
+    // crossed, so unevenness in that settling period is not blamed.
+    present(10000, 0, 28333);
+    expect(timing.stats().intervals == scored && timing.stats().misses == 6,
+           "intervals settling after the adaptive-refresh floor must not be scored");
+    for (int i = 0; i < 30; ++i) present(10000, 0, 20000);
+    const auto resumed = timing.stats().intervals;
+    expect(resumed > scored && timing.stats().misses == 6,
+           "scoring must resume once the stream stays above the floor");
+    // A long gap in a fast stream pauses that interval and its settling period.
+    present(30000, 0, 25000);
+    present(10000, 0, 28333);
+    expect(timing.stats().intervals == resumed && timing.stats().misses == 6,
+           "a gap beyond the floor must not be blamed on the display");
     // Drops and missing feedback start a new sequence; stale or repeated
     // frames are ignored.
-    timing.observe(frame + 1, (frame + 1) * 10000, (frame + 1) * 10000 + 40000, 0, (frame + 1) * 10000 + 40000, 1750);
-    timing.observe(frame - 5, (frame - 5) * 10000, frame * 10000, 0, frame * 10000 + 50000, 1750);
-    expect(timing.stats().intervals == 102 && timing.stats().misses == 2,
-           "frame gaps and out-of-order feedback must not form intervals");
+    for (int i = 0; i < 30; ++i) present(10000, 0, 20000);
+    const auto counted = timing.stats().intervals;
+    frame += 1;
+    present(10000, 0, 40000);
+    timing.observe({frame - 3, submitted - 30000, presented, planned - 30000, 0, presented + 1000}, limits);
+    expect(timing.stats().intervals == counted, "frame gaps and out-of-order feedback must not be scored");
     timing.breakSequence();
-    frame += 2;
-    timing.observe(frame, frame * 10000, frame * 10000 + 90000, 0, frame * 10000 + 90000, 1750);
-    expect(timing.stats().intervals == 102, "a broken sequence must not bridge into the next frame");
-    // The 30 s window ends at the newest observation.
-    const uint64_t later = 100000000;
-    timing.observe(frame + 1, later, later + 20000, 0, later + 20000, 1750);
-    timing.observe(frame + 2, later + 10000, later + 30000, 0, later + 30000, 1750);
+    present(10000, 0, 90000);
+    expect(timing.stats().intervals == counted, "a broken sequence must not bridge into the next frame");
+    // The 30 s window ends at the newest scored interval.
+    planned = 100000000;
+    present(10000, 0, 20000);
+    present(10000, 0, 20000);
     expect(timing.stats().intervals == 1 && timing.stats().misses == 0,
            "present timing issues must age out of the rolling window");
     timing.reset();
-    expect(timing.stats().intervals == 0 && timing.stats().lastObservedUs == 0,
+    expect(timing.stats().intervals == 0 && timing.stats().lastObservedUs == 0 &&
+               timing.stats().lastPausedUs == 0,
            "reset must clear present timing history");
 }
 

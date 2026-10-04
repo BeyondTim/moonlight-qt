@@ -1531,16 +1531,21 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                 else snprintf(average, sizeof(average), "collecting");
                 // Display timing added after submission. The buffer cannot
                 // correct it, so it is reported apart from Smoothness.
-                char presentTiming[96];
+                char presentTiming[160];
                 const auto& present = interval.present;
                 const uint64_t nowUs = LiGetMicroseconds();
-                if (present.intervals && nowUs >= present.lastObservedUs &&
-                        nowUs - present.lastObservedUs <= 1000000) {
-                    snprintf(presentTiming, sizeof(presentTiming), "%.2f%% (%llu/%llu intervals)",
+                const auto fresh = [nowUs](uint64_t at) { return at && nowUs >= at && nowUs - at <= 1000000; };
+                if (present.intervals && fresh(present.lastObservedUs)) {
+                    snprintf(presentTiming, sizeof(presentTiming),
+                        "%.2f%% (%llu/%llu intervals) | Hitches: %llu | Worst: +%.1f ms",
                         present.issuePercent(),
                         static_cast<unsigned long long>(present.misses),
-                        static_cast<unsigned long long>(present.intervals));
+                        static_cast<unsigned long long>(present.intervals),
+                        static_cast<unsigned long long>(present.hitches),
+                        present.worstAddedUs / 1000.0);
                 }
+                else if (fresh(present.lastPausedUs))
+                    snprintf(presentTiming, sizeof(presentTiming), "paused below VRR range");
                 else snprintf(presentTiming, sizeof(presentTiming), "unavailable");
                 if (advancedStats) {
                     ret = snprintf(&output[offset], length - offset,

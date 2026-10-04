@@ -2410,10 +2410,12 @@ void VrrTimingController::notePresentation(const Vrr13::PresentationObservation&
         m_FeedbackLatched = observation.latched;
     }
     m_PresentationPrediction.observe(observation, [this, &observation](const Vrr13::SmoothnessFeedback::Sample& sample,
-                                                                        uint64_t observed, uint64_t submittedUs) {
+                                                                        uint64_t observed, uint64_t submittedUs,
+                                                                        uint64_t plannedUs) {
         if (observation.timeKind == Vrr13::PresentationTimeKind::DisplayEvent) {
-            m_PresentTiming.observe(sample.frame, submittedUs, sample.at, sample.uncertainty,
-                                    observed, intervalQualityToleranceUs(m_Parameters));
+            m_PresentTiming.observe({sample.frame, submittedUs, sample.at, plannedUs, sample.uncertainty, observed},
+                                    {intervalQualityToleranceUs(m_Parameters), m_DisplayPeriodUs,
+                                     m_SourcePeriodUs, m_Parameters.vrrFloorLatchGapUs});
         }
         const auto intervalsBefore = m_NativeSmoothness.observedIntervals();
         const uint64_t demand = m_NativeSmoothness.observe(sample, observed,
