@@ -36,6 +36,10 @@ d3d11bindpolicy.file = $$PWD/d3d11bindpolicy.pro
 SUBDIRS += d3d11bindpolicy
 gamescopecomposition.file = $$PWD/gamescopecomposition.pro
 SUBDIRS += gamescopecomposition
+linux:packagesExist(sdl2) {
+    gpuperformancehold.file = $$PWD/gpuperformancehold.pro
+    SUBDIRS += gpuperformancehold
+}
 linux:packagesExist(vulkan) {
     vulkantiming.file = $$PWD/vulkantiming.pro
     SUBDIRS += vulkantiming

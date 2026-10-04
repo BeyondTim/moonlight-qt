@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "presenttiming.h"
+
 namespace Vrr13 {
 // Client-added interval error, including zero-error intervals. Production
 // scores excess above tolerance per interval before averaging over history;
@@ -66,6 +68,9 @@ public:
         Update update;
         uint64_t lastGrowthAtUs = 0, lastGrowthUs = 0;
         uint64_t lastClippedAtUs = 0, lastClippedUs = 0;
+        // Filled by the controller; post-submission timing never changes
+        // this buffer's score or requests.
+        PresentTiming::Stats present;
         double lossFraction() const {
             return evaluatedUs ? std::clamp(
                 (severityWeighted ? weightedLossUs : double(failedUs)) / evaluatedUs,

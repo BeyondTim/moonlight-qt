@@ -4461,6 +4461,12 @@ void testPredictionOnlyBufferAdaptation()
            "ignored display timing must remain available as optional diagnostic evidence");
     expect(feedback.estimatedCadenceIntervals() > 900,
            "submission prediction must remain the production cadence report");
+    const auto present = feedback.intervalStats().present;
+    expect(present.intervals > 900 && present.misses >= 150 && present.misses <= 210 &&
+               control.intervalStats().present.intervals == 0,
+           "display-only hitches must be reported as present timing issues");
+    expect(feedback.intervalStats().qualityPercent() == control.intervalStats().qualityPercent(),
+           "present timing issues must not lower buffer Smoothness");
 
     Vrr13::Reserve oldHistory(17);
     oldHistory.observe(46000000, 16000000);
@@ -6690,8 +6696,49 @@ void testLateFrameRecoveryWithoutQueueBacklog()
     }
 }
 
+void testPresentTiming()
+{
+    Vrr13::PresentTiming timing;
+    uint64_t frame = 1;
+    // Display spacing equal to submission spacing is clean even when the
+    // display latency is large; only added spacing error counts.
+    for (; frame <= 100; ++frame)
+        timing.observe(frame, frame * 10000, frame * 10000 + 20000, 0, frame * 10000 + 20000, 1750);
+    expect(timing.stats().intervals == 99 && timing.stats().misses == 0,
+           "constant post-submission latency must not be a present timing issue");
+    // One late presentation stretches one interval and shortens the next.
+    timing.observe(frame, frame * 10000, frame * 10000 + 24000, 0, frame * 10000 + 24000, 1750); ++frame;
+    timing.observe(frame, frame * 10000, frame * 10000 + 20000, 0, frame * 10000 + 20000, 1750); ++frame;
+    expect(timing.stats().intervals == 101 && timing.stats().misses == 2 &&
+               timing.stats().errorTotalUs == 8000,
+           "a late presentation must count its stretched and shortened intervals");
+    // Uncertainty is subtracted before the tolerance comparison.
+    timing.observe(frame, frame * 10000, frame * 10000 + 21800, 600, frame * 10000 + 21800, 1750); ++frame;
+    expect(timing.stats().misses == 2, "uncertain display time must not create a miss");
+    // Drops and missing feedback start a new sequence; stale or repeated
+    // frames are ignored.
+    timing.observe(frame + 1, (frame + 1) * 10000, (frame + 1) * 10000 + 40000, 0, (frame + 1) * 10000 + 40000, 1750);
+    timing.observe(frame - 5, (frame - 5) * 10000, frame * 10000, 0, frame * 10000 + 50000, 1750);
+    expect(timing.stats().intervals == 102 && timing.stats().misses == 2,
+           "frame gaps and out-of-order feedback must not form intervals");
+    timing.breakSequence();
+    frame += 2;
+    timing.observe(frame, frame * 10000, frame * 10000 + 90000, 0, frame * 10000 + 90000, 1750);
+    expect(timing.stats().intervals == 102, "a broken sequence must not bridge into the next frame");
+    // The 30 s window ends at the newest observation.
+    const uint64_t later = 100000000;
+    timing.observe(frame + 1, later, later + 20000, 0, later + 20000, 1750);
+    timing.observe(frame + 2, later + 10000, later + 30000, 0, later + 30000, 1750);
+    expect(timing.stats().intervals == 1 && timing.stats().misses == 0,
+           "present timing issues must age out of the rolling window");
+    timing.reset();
+    expect(timing.stats().intervals == 0 && timing.stats().lastObservedUs == 0,
+           "reset must clear present timing history");
+}
+
 int main()
 {
+    testPresentTiming();
     testLateFrameRecoveryWithoutQueueBacklog();
     testProductionGradualBacklogRecovery();
     {

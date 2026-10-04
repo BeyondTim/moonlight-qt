@@ -1,4 +1,5 @@
 #include "pacer.h"
+#include "../../videothreadpriority.h"
 #include "path.h"
 #include <QCryptographicHash>
 #include "vrrpacingworker.h"
@@ -110,6 +111,11 @@ PacerTelemetrySnapshot Pacer::telemetrySnapshot() const
     return m_Telemetry.snapshot();
 }
 
+Overlay::TimingGraphSnapshot Pacer::timingGraphSnapshot() const
+{
+    return m_Telemetry.timingGraphSnapshot();
+}
+
 void Pacer::renderOnMainThread()
 {
     if (m_VrrWorker != nullptr) {
@@ -138,11 +144,7 @@ int Pacer::vsyncThread(void *context)
 {
     Pacer* me = reinterpret_cast<Pacer*>(context);
 
-#if SDL_VERSION_ATLEAST(2, 0, 9)
-    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_TIME_CRITICAL);
-#else
-    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
-#endif
+    const VideoThreadPriority priority("VSync", VideoThreadPriority::Role::Deadline);
 
     bool async = me->m_VsyncSource->isAsync();
     while (!me->m_Stopping) {
@@ -171,11 +173,7 @@ int Pacer::renderThread(void* context)
 {
     Pacer* me = reinterpret_cast<Pacer*>(context);
 
-    if (SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH) < 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to set render thread to high priority: %s",
-                    SDL_GetError());
-    }
+    const VideoThreadPriority priority("Render");
 
     while (!me->m_Stopping) {
         // Wait for the renderer to be ready for the next frame

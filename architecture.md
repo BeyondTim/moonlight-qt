@@ -12,6 +12,10 @@ above-target shrinkage correction and per-interval excess scoring in this
 worktree. Deployment and live
 smoothness must be verified separately from this source description.
 
+The 2026-10-03 scheduling work also adds dedicated-video-thread priority
+requests and CPU-pause polling in the bounded final deadline wait, described
+in section 7.3. Controller targets and buffer policy are unchanged by that work.
+
 The first live Windows PyroWave retry negotiated H.264 because the common library
 had format constants without DESCRIBE selection or ANNOUNCE attributes. The
 2026-09-25 4K/116 FPS PyroWave session subsequently confirmed live streaming.
@@ -2393,11 +2397,33 @@ protection from this choice.
 ### 7.3 Waiting and scheduler accounting
 
 `VrrTargetWaiter` uses the same monotonic clock as the controller. It sleeps
-coarsely until a bounded active region, then yields/polls near the deadline.
-Active waiting is capped at 500 microseconds; learned target wake lead is also
-bounded at 500 microseconds. Windows prefers a high-resolution waitable timer
+coarsely until a bounded active region, then polls using
+`SDL_CPUPauseInstruction()` near the deadline. Unlike the previous
+`std::this_thread::yield()`, this CPU hint does not voluntarily surrender the
+OS timeslice just before submission. The base active region is 500 microseconds;
+learned target wake lead adds at most another 500 microseconds, for a maximum
+1 ms region per wait. Clock-stall escape and absolute-deadline checks remain.
+Historical trace `active_yield_count` fields now count active polling steps;
+the hook name remains `yield` for deterministic tests. Windows prefers a high-resolution waitable timer
 with a sleep fallback. Render and target wake-delay observations feed later
 decisions, with separate limits.
+
+`VideoThreadPriority` runs once at entry on the dedicated decoder, renderer,
+V-sync, VRR pacer and optional Vulkan preparation threads. Windows first
+registers each with MMCSS `Playback`, at relative HIGH for deadline threads
+and NORMAL for decode/render/preparation. Registration is released on the same
+thread at exit; the system AVRT DLL is loaded dynamically. If unavailable,
+SDL provides the platform fallback. On other platforms SDL is the primary
+API: deadline threads retain the TIME_CRITICAL request but now retry HIGH on
+failure, while other dedicated video threads request HIGH. Each accepted or
+rejected request is logged once. These requests need no GPU-specific CPU API;
+OS permissions and scheduler policy still control effectiveness. Main-thread
+renderers, codec-internal workers, network, audio and the compositor retain
+their existing scheduling. No process priority, affinity or system settings
+are changed. Priority and polling improvements require a fresh live comparison
+of submit jerk and matched display feedback; replay cannot predict scheduling
+or compositor changes. The bounded active wait consumes more CPU than yielding
+when another runnable thread could otherwise use that time.
 
 A timer returning is not permission to submit early. The worker rereads time
 and loops until the applicable floor has actually been reached. Conversely,
@@ -3626,6 +3652,106 @@ With deep tracing off, the overview retains the VRR17 frame queue delay,
 rendering time, incoming host smoothness, VRR pacing/smoothness target, and
 interval-error rows. The historical Smoothness label still denotes the client
 interval-quality score, not measured physical display smoothness.
+
+Live statistics timing graph (2026-10-03, over `92119295` plus this worktree):
+the frametime graph is a separate overlay toggle from the stats text
+(`showFrametimeGraph`, default off; Ctrl+Alt+Shift+F or Select+L1+R1+Y while
+streaming). `OverlayManager` keeps separate stats and graph flags; the debug
+overlay is enabled while either shows, so renderers need no new overlay type, and
+the graph can show without the text. It draws three aligned lanes, each with
+the raw interval of the newest 240 frames: Planned cadence (gray, target to
+target), Client submissions (cyan) and Display events (magenta, OS-reported
+`DisplayEvent` times). All lanes share one millisecond axis centred on the
+median planned interval with a +/-2 ms range, so a disturbance appears only in
+the lane where it enters the pipeline. Intervals within 1 ms of the reference
+(`TimingGraphLayout::FlatUs`) are drawn on the reference line, because that
+variation is not noticeable; larger ones are drawn at their true value, and
+captions keep raw values. A spike in Display events with flat
+Planned/Client lanes was added after submission (GPU, compositor or display
+scheduling). Values beyond the axis are clipped with red edge markers, and each
+caption gives the latest interval and window peak; the display caption also
+counts matched intervals. `timingGraphInterval()` defines each lane. A display
+interval needs feedback for both frames of the same epoch and backend, so a
+missing presentation is a gap, never one long interval. Planned intervals
+include buffer steps, which therefore appear as matching planned and submission
+spikes.
+
+Present timing issues (2026-10-03): `Vrr13::PresentTiming` counts, over a rolling
+30 s window ending at the newest observation, display intervals whose spacing
+differs from the matching submission spacing by more than the interval tolerance
+after subtracting both samples' uncertainty. The controller feeds it from
+`notePresentation()` with matched `DisplayEvent` samples only; the prediction
+callback now passes the matched submission time. Only adjacent submitted frames
+with feedback for both form an interval; drops, missing feedback, feedback-mode
+changes and rebases start a new sequence. The result rides in
+`IntervalBuffer::Stats::present` for the stats overlay
+(`Present timing issues (30s)`, or unavailable after 1 s without feedback). It
+is diagnostic only: production revision 9 scores Smoothness from submission
+intervals and keeps native-hitch adaptation off, so display misses neither lower
+Smoothness nor grow, hold or release the buffer. Targets, buffer policy, trace
+schema and exact replay are unchanged.
+
+This is available during ordinary VRR streams without tracing.
+`TimingGraphHistory` keeps 256 observations, allocated once when the pacer is
+created. Normal worker outcomes populate it under the existing telemetry lock;
+there are no new graphics-driver calls or per-frame allocations. While stats are
+enabled the decoder copies the newest 241 points (one predecessor for the first
+display interval) at 10 Hz and with each roughly one-second text refresh. The
+overlay worker draws the lanes into the existing debug-overlay surface shared by
+the surface-based renderer APIs, so renderer overlay uploads occur at up to
+10 Hz while stats are shown. Controller targets, buffer policy and trace schema
+are unchanged by this chart.
+
+At 4K drawable output (at least 3840 by 2160 pixels, in either orientation), the
+stats font increases from 20 to 26 pixels. Graph dimensions, strokes, text wrap
+width and outline size scale with it by 1.3, rather than stretching a pre-rendered
+bitmap. Initial renderer attachment and window size/display changes update this
+policy; lower-resolution outputs return to normal size. Modern SDL queries
+physical drawable pixels, including high-DPI windows; older SDLs use GL drawable
+size or ordinary window size. Font replacement is owned by the overlay worker,
+and revision validation discards stale work during output changes. Status-message
+font sizes remain independent.
+
+Display events are associated by backend, submission ID and presentation epoch;
+delayed feedback updates the earlier frame's observation. Only `DisplayEvent`
+timestamps are accepted. DXGI `RefreshReference` samples, Present return times
+and modeled scanout are excluded. Missing or nonmonotonic display samples leave
+gaps, and a backend without feedback shows `Display events: unavailable`. These remain OS
+presentation observations, not physical-panel timing. Source rebases/phase
+discontinuities break the curves and ID matching, while ordinary client drops
+remain visible in the next measured submission interval. A fresh live stream is
+required to verify readability and GPU/upload cost on a particular device.
+
+GPU performance hold (2026-10-03, over `92119295`): with Settings > **High-performance
+GPU power while streaming** (`highPerformanceGpuPower`, default off), `Session::exec()`
+holds a `GpuPerformanceHold` for the stream. On Linux it selects amdgpu render
+nodes whose device has a connected connector and whose
+`power_dpm_force_performance_level` is `auto`, allocates an amdgpu context on
+the render node and requests `AMDGPU_CTX_STABLE_PSTATE_PEAK`, then reads the
+state back. The request is unprivileged, works from the rootless development
+container, and is owned by that context: freeing it (at stream end or process
+death) restores the level captured at context creation. A sysfs write during the
+stream (Steam's manual GPU clock, for example) clears context ownership and is
+not overridden. Any other existing level is left alone and logged; EBUSY means
+another process holds a stable pstate. On the Steam Deck, PEAK fixes GFX at 1300
+MHz and FCLK/MCLK at 800 MHz (sysfs `high` reaches 1600 MHz GFX but needs root).
+Other platforms and vendors have no equivalent unprivileged per-process request,
+so the setting is Linux-only and the hold is a no-op elsewhere. Logs use the
+`GPU performance hold:` prefix. This addresses demand-based clock ramping that
+delays presentation after on-time submission.
+
+Video thread scheduling (2026-10-03, over `92119295`): the decoder, dedicated
+renderer, V-sync, VRR pacer and Vulkan preparation threads request scheduling
+priority once through `VideoThreadPriority`. Windows registers each with the
+MMCSS `Playback` task (HIGH relative priority for pacing/V-sync, NORMAL for
+decode/render/preparation) and falls back to SDL; other platforms use SDL
+directly, TIME_CRITICAL then HIGH for pacing/V-sync. Results are logged as
+`Video thread priority:`. The final VRR deadline region polls with SDL's CPU
+pause hint instead of an OS scheduler yield; the coarse sleep, the 500 us base
+region plus at most 500 us learned wake lead, targets and buffer policy are
+unchanged, and trace `active_yield_count` fields now count polling steps. No GPU
+scheduling priority is requested: it orders work between GPU contexts, does not
+change clocks, and amdgpu denies above-normal priority without `CAP_SYS_NICE`.
 
 Advanced stats follow the worker's `MOONLIGHT_VRR_DEEP_TRACE` switch (value
 starting with `1`), including the Settings tracing checkbox and external deep

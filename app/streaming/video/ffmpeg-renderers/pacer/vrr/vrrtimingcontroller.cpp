@@ -464,6 +464,7 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
     m_MeanMissBuffer.breakSequence();
     m_IntervalBuffer.breakSequence();
     m_PresentationPrediction.reset();
+    m_PresentTiming.breakSequence();
     m_SubmissionSmoothness.breakSequence();
     m_NativeSmoothness.breakSequence();
     m_FeedbackModeValid = false;
@@ -472,6 +473,7 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
     if (!retainLearnedBudgets) {
         m_MeanMissBuffer.reset();
         m_IntervalBuffer.reset();
+        m_PresentTiming.reset();
         m_SubmissionSmoothness.reset();
         m_NativeSmoothness.reset();
         m_RequestedPlayoutDelayUs = 0;
@@ -2400,12 +2402,19 @@ void VrrTimingController::notePresentation(const Vrr13::PresentationObservation&
         return;
     }
     if (observation.submitted) {
-        if (m_FeedbackModeValid && m_FeedbackLatched != observation.latched)
+        if (m_FeedbackModeValid && m_FeedbackLatched != observation.latched) {
             m_NativeSmoothness.breakSequence();
+            m_PresentTiming.breakSequence();
+        }
         m_FeedbackModeValid = true;
         m_FeedbackLatched = observation.latched;
     }
-    m_PresentationPrediction.observe(observation, [this, &observation](const Vrr13::SmoothnessFeedback::Sample& sample, uint64_t observed) {
+    m_PresentationPrediction.observe(observation, [this, &observation](const Vrr13::SmoothnessFeedback::Sample& sample,
+                                                                        uint64_t observed, uint64_t submittedUs) {
+        if (observation.timeKind == Vrr13::PresentationTimeKind::DisplayEvent) {
+            m_PresentTiming.observe(sample.frame, submittedUs, sample.at, sample.uncertainty,
+                                    observed, intervalQualityToleranceUs(m_Parameters));
+        }
         const auto intervalsBefore = m_NativeSmoothness.observedIntervals();
         const uint64_t demand = m_NativeSmoothness.observe(sample, observed,
             observation.timeKind == Vrr13::PresentationTimeKind::DisplayEvent ||

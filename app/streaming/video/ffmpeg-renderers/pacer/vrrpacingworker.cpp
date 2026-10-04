@@ -1,6 +1,7 @@
 #include "vrr/profile.h"
 #include "vrr/profilecodec.h"
 #include "vrrpacingworker.h"
+#include "../../videothreadpriority.h"
 
 #include "vrr/vrrtargetwaiter.h"
 #include "vrr/vrrtimingcontroller.h"
@@ -368,15 +369,7 @@ int VrrPacingWorker::threadProc(void* context)
 
 int VrrPacingWorker::run()
 {
-#if SDL_VERSION_ATLEAST(2, 0, 9)
-    if (SDL_SetThreadPriority(SDL_THREAD_PRIORITY_TIME_CRITICAL) < 0) {
-#else
-    if (SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH) < 0) {
-#endif
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to set VRR pacing worker priority: %s",
-                    SDL_GetError());
-    }
+    const VideoThreadPriority priority("VRRPacer", VideoThreadPriority::Role::Deadline);
 
     while (!isStopping()) {
         consumeWindowStateNotifications();
@@ -899,6 +892,20 @@ int VrrPacingWorker::run()
                          telemetry);
         if (m_Telemetry != nullptr) {
             VrrTelemetrySample sample;
+            sample.graph.submitted = feedback.presented && !feedback.cancelled;
+            sample.graph.submissionUs = telemetry.submissionBoundaryUs;
+            sample.graph.targetUs = decision.targetUs;
+            sample.graph.sourcePeriodUs = decision.sourcePeriodUs;
+            sample.graph.bufferUs = decision.playoutDelayUs;
+            sample.graph.requestedBufferUs = decision.requestedPlayoutDelayUs;
+            sample.graph.discontinuity = decision.rebased || decision.phaseDiscontinuity || externalRebaseApplied;
+            sample.graph.backend = feedback.nativeBackendValid ? uint32_t(feedback.nativeBackend) : 0;
+            sample.graph.idValid = feedback.submissionIdValid;
+            sample.graph.submissionId = feedback.submissionId;
+            sample.graph.displayValid = feedback.latchSampleValid &&
+                feedback.latchTimeKind == Vrr13::PresentationTimeKind::DisplayEvent;
+            sample.graph.displayId = feedback.latchSubmissionId;
+            sample.graph.displayUs = feedback.latchTimeUs;
             sample.queueResidenceUs = positiveDifference(queuedFrame.trace.dequeueUs,
                                                          queuedFrame.trace.arrivalUs);
             sample.decodeWaitUs = telemetry.decodeSyncWaitUs;

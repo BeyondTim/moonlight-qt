@@ -166,6 +166,7 @@ public:
     Q_PROPERTY(int vrrHistorySeconds READ vrrHistorySeconds WRITE setVrrHistorySeconds NOTIFY vrrTimingChanged)
     Q_PROPERTY(int vrrToleranceUs READ vrrToleranceUs WRITE setVrrToleranceUs NOTIFY vrrTimingChanged)
     Q_PROPERTY(bool smoothVrrFrameTiming MEMBER smoothVrrFrameTiming NOTIFY smoothVrrFrameTimingChanged)
+    Q_PROPERTY(bool highPerformanceGpuPower MEMBER highPerformanceGpuPower NOTIFY highPerformanceGpuPowerChanged)
     Q_PROPERTY(bool traceVrrFrames MEMBER traceVrrFrames NOTIFY traceVrrFramesChanged)
     Q_PROPERTY(bool exportingDiagnostics MEMBER m_ExportingDiagnostics NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsStatus MEMBER m_DiagnosticsStatus NOTIFY diagnosticsChanged)
@@ -183,6 +184,7 @@ public:
     Q_PROPERTY(bool gamepadMouse MEMBER gamepadMouse NOTIFY gamepadMouseChanged)
     Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(bool showPerformanceOverlay MEMBER showPerformanceOverlay NOTIFY showPerformanceOverlayChanged)
+    Q_PROPERTY(bool showFrametimeGraph MEMBER showFrametimeGraph NOTIFY showFrametimeGraphChanged)
     Q_PROPERTY(AudioConfig audioConfig MEMBER audioConfig NOTIFY audioConfigChanged)
     Q_PROPERTY(VideoCodecConfig videoCodecConfig MEMBER videoCodecConfig NOTIFY videoCodecConfigChanged)
     Q_PROPERTY(bool enableHdr MEMBER enableHdr NOTIFY enableHdrChanged)
@@ -224,6 +226,7 @@ public:
     // adaptive-refresh floor, so the panel never engages its own
     // low-framerate compensation.
     bool smoothVrrFrameTiming;
+    bool highPerformanceGpuPower;
     bool traceVrrFrames;
     bool gameOptimizations;
     bool playAudioOnHost;
@@ -239,6 +242,7 @@ public:
     bool gamepadMouse;
     bool detectNetworkBlocking;
     bool showPerformanceOverlay;
+    bool showFrametimeGraph;
     bool swapMouseButtons;
     bool muteOnFocusLoss;
     bool backgroundGamepad;
@@ -271,6 +275,7 @@ signals:
     void vrrLatencyModeChanged();
     void vrrTimingChanged();
     void smoothVrrFrameTimingChanged();
+    void highPerformanceGpuPowerChanged();
     void traceVrrFramesChanged();
     void diagnosticsChanged();
     void gameOptimizationsChanged();
@@ -295,6 +300,7 @@ signals:
     void gamepadMouseChanged();
     void detectNetworkBlockingChanged();
     void showPerformanceOverlayChanged();
+    void showFrametimeGraphChanged();
     void mouseButtonsChanged();
     void muteOnFocusLossChanged();
     void backgroundGamepadChanged();

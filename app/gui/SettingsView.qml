@@ -1402,6 +1402,21 @@ Flickable {
                 }
 
                 CheckBox {
+                    hoverEnabled: true
+                    text: qsTr("High-performance GPU power while streaming")
+                    font.pointSize: 12
+                    visible: Qt.platform.os === "linux"
+                    checked: StreamingPreferences.highPerformanceGpuPower
+                    onCheckedChanged: StreamingPreferences.highPerformanceGpuPower = checked
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Holds an AMD GPU at its high-performance clocks for the whole stream so it cannot drop its clocks between frames, which can delay when the display shows a frame that was ready on time. Uses more power and reduces battery life. Has no effect if GPU clocks are already set manually.") + "\n\n" +
+                                  qsTr("Takes effect at the start of the next stream.")
+                }
+
+                CheckBox {
                     id: enableHdr
                     width: parent.width
                     text: qsTr("Enable HDR")
@@ -2338,6 +2353,23 @@ Flickable {
                     ToolTip.text: qsTr("Display real-time stream performance information while streaming.") + "\n\n" +
                                   qsTr("You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.") + "\n\n" +
                                   qsTr("The performance overlay is not supported on Steam Link or Raspberry Pi.")
+                }
+
+                CheckBox {
+                    id: showFrametimeGraph
+                    width: parent.width
+                    text: qsTr("Show frametime graph while streaming")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.showFrametimeGraph
+                    onCheckedChanged: {
+                        StreamingPreferences.showFrametimeGraph = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Shows planned, submitted and displayed frame intervals in separate lanes during VRR streaming, so you can see where a stutter starts. Variation under 1 ms is drawn flat.") + "\n\n" +
+                                  qsTr("You can toggle it at any time while streaming using Ctrl+Alt+Shift+F or Select+L1+R1+Y (Triangle).")
                 }
             }
         }

@@ -7,6 +7,7 @@
 #include "streaming/streamutils.h"
 #include "streaming/vrrratepolicy.h"
 #include "backend/richpresencemanager.h"
+#include "streaming/gpuperformancehold.h"
 #include "backend/networkbuffers.h"
 
 #include <Limelight.h>
@@ -2222,8 +2223,12 @@ void Session::exec()
     // Start rich presence to indicate we're in game
     RichPresenceManager presence(*m_Preferences, m_App.name);
 
+    // Hold the display GPU at high-performance clocks if requested
+    GpuPerformanceHold gpuPerformance(m_Preferences->highPerformanceGpuPower);
+
     // Toggle the stats overlay if requested by the user
     m_OverlayManager.setOverlayState(Overlay::OverlayDebug, m_Preferences->showPerformanceOverlay);
+    m_OverlayManager.setTimingGraphState(m_Preferences->showFrametimeGraph);
 
     // Switch to async logging mode when we enter the SDL loop
     StreamUtils::enterAsyncLoggingMode();

@@ -1,5 +1,6 @@
 #include <Limelight.h>
 #include "ffmpeg.h"
+#include "videothreadpriority.h"
 #include "utils.h"
 #include "streaming/session.h"
 #include "diagnostics/gputrace.h"
@@ -73,6 +74,23 @@ extern "C" {
 
 #define FAILED_DECODES_RESET_THRESHOLD 20
 
+static void updateStatsOutputSize(SDL_Window* window)
+{
+    if (window == nullptr) return;
+    int width = 0, height = 0;
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    SDL_GetWindowSizeInPixels(window, &width, &height);
+#else
+    // Older bundled SDLs lack the generic drawable-size query. OpenGL has
+    // provided one for longer; other old backends retain their window size.
+    if (SDL_GetWindowFlags(window) & SDL_WINDOW_OPENGL)
+        SDL_GL_GetDrawableSize(window, &width, &height);
+    else
+        SDL_GetWindowSize(window, &width, &height);
+#endif
+    Session::get()->getOverlayManager().setOutputSize(width, height);
+}
+
 bool FFmpegVideoDecoder::isHardwareAccelerated()
 {
     // PyroWave decodes on the GPU in Vulkan compute
@@ -105,6 +123,8 @@ bool FFmpegVideoDecoder::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
         WINDOW_STATE_CHANGE_SIZE |
         WINDOW_STATE_CHANGE_DISPLAY;
     const WINDOW_STATE_CHANGE_INFO originalInfo = *info;
+    if (originalInfo.stateChangeFlags & deferredPacerFlags)
+        updateStatsOutputSize(originalInfo.window);
 
     // Suspension must reach the worker immediately so it cannot submit
     // another frame after a minimize/background notification. Geometry and
@@ -902,6 +922,7 @@ bool FFmpegVideoDecoder::finishRenderInitialization(PDECODER_PARAMETERS params)
     }
 
     // Tell overlay manager to use this frontend renderer
+    updateStatsOutputSize(params->window);
     Session::get()->getOverlayManager().setOverlayRenderer(m_FrontendRenderer);
 
     // Allow the renderer to perform final preparations for rendering
@@ -1508,26 +1529,43 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                 if (interval.averageValid)
                     snprintf(average, sizeof(average), "%.3f ms", interval.averageErrorUs / 1000.0);
                 else snprintf(average, sizeof(average), "collecting");
+                // Display timing added after submission. The buffer cannot
+                // correct it, so it is reported apart from Smoothness.
+                char presentTiming[96];
+                const auto& present = interval.present;
+                const uint64_t nowUs = LiGetMicroseconds();
+                if (present.intervals && nowUs >= present.lastObservedUs &&
+                        nowUs - present.lastObservedUs <= 1000000) {
+                    snprintf(presentTiming, sizeof(presentTiming), "%.2f%% (%llu/%llu intervals)",
+                        present.issuePercent(),
+                        static_cast<unsigned long long>(present.misses),
+                        static_cast<unsigned long long>(present.intervals));
+                }
+                else snprintf(presentTiming, sizeof(presentTiming), "unavailable");
                 if (advancedStats) {
                     ret = snprintf(&output[offset], length - offset,
                         "Client timing: %s (target %.2f%% over %s)\n"
-                        "Timing error (1s avg): %s | Allowed: %.2f ms | Drops (30s): %llu\n",
+                        "Timing error (1s avg): %s | Allowed: %.2f ms | Drops (30s): %llu\n"
+                        "Present timing issues (30s): %s\n",
                         score,
                         stats.vrrOnTimeTargetPerMillion / 10000.0,
                         scoreWindow, average,
                         interval.toleranceUs / 1000.0,
-                        static_cast<unsigned long long>(readiness.dropped));
+                        static_cast<unsigned long long>(readiness.dropped),
+                        presentTiming);
                 }
                 else {
                     ret = snprintf(&output[offset], length - offset,
                         "VRR pacing: %s | Smoothness (%s): %s / %.2f%% target%s\n"
-                        "Client interval error (1s): %s | Tolerance: %.2f ms | Dropped (30s): %llu\n",
+                        "Client interval error (1s): %s | Tolerance: %.2f ms | Dropped (30s): %llu\n"
+                        "Present timing issues (30s): %s\n",
                         stats.vrrTelemetryActive ? "Active" : "Inactive",
                         scoreWindow, score,
                         stats.vrrOnTimeTargetPerMillion / 10000.0,
                         stats.vrrBufferAtLimit ? " (buffer limit)" : "", average,
                         interval.toleranceUs / 1000.0,
-                        static_cast<unsigned long long>(readiness.dropped));
+                        static_cast<unsigned long long>(readiness.dropped),
+                        presentTiming);
                 }
             }
             else if (readiness.meanMissPolicy) {
@@ -2592,6 +2630,8 @@ int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 
 void FFmpegVideoDecoder::decoderThreadProc()
 {
+    const VideoThreadPriority priority("FFDecoder");
+
     while (!SDL_AtomicGet(&m_DecoderThreadShouldQuit)) {
         if (m_FramesIn == m_FramesOut) {
             VIDEO_FRAME_HANDLE handle;
@@ -2901,6 +2941,14 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     m_BwTracker.AddBytes(du->fullLength);
 
+    // The stats text changes once per second; the timing graph scrolls at 10 Hz.
+    const uint64_t graphNowUs = LiGetMicroseconds();
+    if (m_Pacer && graphNowUs - m_LastTimingGraphUs >= 100000 &&
+            Session::get()->getOverlayManager().isTimingGraphEnabled()) {
+        m_LastTimingGraphUs = graphNowUs;
+        Session::get()->getOverlayManager().updateTimingGraph(m_Pacer->timingGraphSnapshot());
+    }
+
     // Flip stats windows roughly every second
     if (LiGetMicroseconds() > m_ActiveWndVideoStats.measurementStartUs + 1000000) {
         // Pacer producers publish cumulative snapshots. Merge the delta before
@@ -2908,14 +2956,16 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         syncPacerTelemetry();
 
         // Update overlay stats if it's enabled
-        if (Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug)) {
+        if (Session::get()->getOverlayManager().isStatsEnabled()) {
             VIDEO_STATS lastTwoWndStats = {};
             addVideoStats(m_LastWndVideoStats, lastTwoWndStats);
             addVideoStats(m_ActiveWndVideoStats, lastTwoWndStats);
 
             char text[4096];
             stringifyVideoStats(lastTwoWndStats, text, sizeof(text));
-            Session::get()->getOverlayManager().updateOverlayText(Overlay::OverlayDebug, text);
+            Session::get()->getOverlayManager().updateOverlayText(Overlay::OverlayDebug, text,
+                m_Pacer && Session::get()->getOverlayManager().isTimingGraphEnabled() ?
+                    m_Pacer->timingGraphSnapshot() : Overlay::TimingGraphSnapshot{});
         }
 
         // Accumulate these values into the global stats

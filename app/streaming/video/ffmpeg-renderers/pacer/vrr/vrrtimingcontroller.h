@@ -380,7 +380,11 @@ public:
     uint64_t estimatedCadenceHitches() const { return m_EstimatedCadenceHitches; }
     uint64_t nativeCadenceHitches() const { return m_NativeCadenceHitches; }
     Vrr13::SmoothnessFeedback::Sample smoothnessSample(const VrrTimingDecision& decision) const;
-    Vrr13::IntervalBuffer::Stats intervalStats() const { return m_IntervalBuffer.stats(); }
+    Vrr13::IntervalBuffer::Stats intervalStats() const {
+        auto stats = m_IntervalBuffer.stats();
+        stats.present = m_PresentTiming.stats();
+        return stats;
+    }
     uint64_t typicalRenderUs() const;
     uint64_t recoveryHeadroomUs() const;
 
@@ -679,6 +683,7 @@ private:
     uint64_t m_EpochCandidateMilliHz = 0;
     uint64_t m_EpochCandidateSinceUs = 0;
     Vrr13::PresentationPrediction m_PresentationPrediction;
+    Vrr13::PresentTiming m_PresentTiming;
     Vrr13::SmoothnessFeedback m_SubmissionSmoothness, m_NativeSmoothness;
     // Lifetime counters for decoder-owned reporting windows. These do not
     // expire with the controller's rolling adaptation histogram.

@@ -203,6 +203,7 @@ SOURCES += \
     streaming/input/mouse.cpp \
     streaming/input/reltouch.cpp \
     streaming/session.cpp \
+    streaming/gpuperformancehold.cpp \
     streaming/gamescopecomposition.cpp \
     streaming/audio/audio.cpp \
     streaming/audio/renderers/sdlaud.cpp \
@@ -222,6 +223,8 @@ SOURCES += \
     wm.cpp
 
 HEADERS += \
+    streaming/video/videothreadpriority.h \
+    streaming/video/timinggraph.h \
     streaming/input/dualsensehid.h \
     streaming/input/dualsensetriggers.h \
     ../third-party/saxense/packet.h \
@@ -253,6 +256,7 @@ HEADERS += \
     streaming/input/dualsensehaptics.h \
     streaming/input/input.h \
     streaming/session.h \
+    streaming/gpuperformancehold.h \
     streaming/video/amddecodepolicy.h \
     streaming/video/pyrowave/pyrowavecalibrator.h \
     streaming/video/pyrowave/pyrowavebandwidth.h \

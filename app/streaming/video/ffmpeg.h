@@ -142,6 +142,7 @@ private:
     VIDEO_STATS m_GlobalVideoStats;
     PacerTelemetrySnapshot m_LastPacerTelemetry;
     ClientPacingWarning m_ClientPacingWarning;
+    uint64_t m_LastTimingGraphUs = 0;
     bool m_VrrUsesMaximumBuffer = false;
     std::set<IFFmpegRenderer::RendererType> m_FailedRenderers;
 

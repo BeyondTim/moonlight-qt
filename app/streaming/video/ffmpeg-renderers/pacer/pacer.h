@@ -46,6 +46,7 @@ public:
     void shutdown();
 
     PacerTelemetrySnapshot telemetrySnapshot() const;
+    Overlay::TimingGraphSnapshot timingGraphSnapshot() const;
 
     // Only the active VRR worker consumes the decoder-facing pacing metadata.
     void submitFrame(PacedFrame&& frame);

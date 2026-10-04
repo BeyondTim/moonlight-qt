@@ -222,6 +222,10 @@ void testPreparedFramesOverlapAndTrace()
     }
     expect(backend.stopped && first.releases == 1 && second.releases == 1 && pending.releases == 1,
            "prepared-frame shutdown must stop preparation and release each image exactly once");
+    const auto graph = telemetry.timingGraphSnapshot();
+    expect(graph.size() == 2 && graph[0].targetUs && graph[0].submissionUs &&
+               graph[1].targetUs && graph[1].submissionUs,
+           "normal prepared presentations must publish individual target and submission observations for live stats");
     const auto lines = readExpandedTrace(path).split('\n');
     const auto columns = lines.value(0).split(',');
     int stagedRows = 0;
