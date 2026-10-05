@@ -433,6 +433,9 @@ bool validateVrrTimingParameters(const VrrTimingParameters& value,
     if (value.playoutAdaptiveOnly > 1) {
         return fail("playout_adaptive_only must be 0 or 1");
     }
+    if (value.nativeSynchronizedPresentation > 1) {
+        return fail("native_synchronized_presentation must be 0 or 1");
+    }
     if (value.latencyFixEnabled > 1 || value.latencyFixAllRates > 1 || value.latencyFixDelayPeriodPerMille > 1000) {
         return fail("latency_fix_enabled and latency_fix_all_rates must be 0 or 1 and latency_fix_delay_period_per_mille must be in 0..1000");
     }

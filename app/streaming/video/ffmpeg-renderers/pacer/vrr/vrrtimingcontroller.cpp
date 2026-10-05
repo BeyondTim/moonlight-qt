@@ -160,7 +160,7 @@ uint64_t intervalQualityToleranceUs(const VrrTimingParameters& parameters)
 } // namespace
 
 VrrTimingParameters vrrTimingParametersForSession(
-    const VrrSessionConfig& config)
+    const VrrSessionConfig& config, bool nativeSynchronizedPresentation)
 {
     // Present on a tracked source cadence plus a learned delay. The readiness
     // reserve, its per-frame slewing, and every phase re-anchor are off on this
@@ -169,6 +169,7 @@ VrrTimingParameters vrrTimingParametersForSession(
     // moves renderStart earlier without moving the presentation deadline.
     // Explicit parameters keep older policies replayable.
     VrrTimingParameters parameters;
+    parameters.nativeSynchronizedPresentation = nativeSynchronizedPresentation ? 1 : 0;
     // Mode zero is the new Smooth profile. Captured parameters retain their
     // own defaults for exact replay.
     const int latencyMode = config.latencyMode >= 0 && config.latencyMode <= 2 ?
@@ -431,7 +432,8 @@ void VrrTimingController::clearTimeline(bool retainLearnedBudgets)
     m_LatencyFixActive = false;
     updateLatencyFixState();
     m_MetronomePeriodUsQ16 = m_ConfiguredStreamPeriodQ16;
-    m_LatchedPresentation = m_Parameters.playoutAdaptiveOnly ? false :
+    m_LatchedPresentation = m_CanLatchPresentation && m_Parameters.nativeSynchronizedPresentation ? true :
+        m_Parameters.playoutAdaptiveOnly ? false :
         m_Parameters.playoutRateProtectionEnabled ?
         rateProtectedPresentation() : m_CanLatchPresentation && m_SourcePeriodUs <
         saturatingAdd(m_DisplayPeriodUs,
@@ -944,7 +946,10 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
                                 nowUs);
     }
 
-    if (m_Parameters.playoutAdaptiveOnly != 0) {
+    if (m_CanLatchPresentation && m_Parameters.nativeSynchronizedPresentation != 0) {
+        m_LatchedPresentation = true;
+    }
+    else if (m_Parameters.playoutAdaptiveOnly != 0) {
         m_LatchedPresentation = false;
     }
     else if (m_Parameters.playoutRateProtectionEnabled != 0) {
@@ -1127,7 +1132,10 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
             --m_CadenceStabilityLatchFramesRemaining;
         }
     }
-    if (m_Parameters.playoutAdaptiveOnly != 0) {
+    if (m_CanLatchPresentation && m_Parameters.nativeSynchronizedPresentation != 0) {
+        m_LatchedPresentation = true;
+    }
+    else if (m_Parameters.playoutAdaptiveOnly != 0) {
         m_LatchedPresentation = false;
     }
     else if (m_Parameters.playoutRateProtectionEnabled != 0 ||

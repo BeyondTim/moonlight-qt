@@ -2324,6 +2324,87 @@ private:
     VrrPresentFeedback m_GpuFeedback;
 };
 
+class SynchronizedCompositionPresenter : public FakeVrrFramePresenter {
+public:
+    bool alwaysSynchronizesAdaptivePresent() const override { return true; }
+
+    VrrPresentFeedback presentAdaptive(const VrrPresentRequest& request) override
+    {
+        auto feedback = FakeVrrFramePresenter::presentAdaptive(request);
+        feedback.nativeBackend = VrrNativePresentationBackend::Composition;
+        feedback.nativePresentTimingValid = true;
+        feedback.nativePresentStartUs = feedback.submissionTimeUs;
+        feedback.nativePresentEndUs = LiGetMicroseconds();
+        feedback.submissionIdValid = feedback.presented;
+        feedback.submissionId = ++m_Id;
+        if (m_PreviousSubmissionUs) {
+            feedback.latchSampleValid = true;
+            feedback.latchTimeKind = Vrr13::PresentationTimeKind::DisplayEvent;
+            feedback.latchSubmissionId = m_Id - 1;
+            feedback.latchTimeUs = m_PreviousSubmissionUs + 500;
+            feedback.presentationUncertaintyUs = 1;
+        }
+        m_PreviousSubmissionUs = feedback.submissionTimeUs;
+        return feedback;
+    }
+
+private:
+    uint64_t m_Id = 0, m_PreviousSubmissionUs = 0;
+};
+
+void testSynchronizedCompositionFeedback()
+{
+    resetFakeClock();
+    QTemporaryDir traceDirectory;
+    expect(traceDirectory.isValid(), "composition feedback trace directory must exist");
+    const QString tracePath = traceDirectory.filePath("composition-feedback.vrrtrace");
+    qputenv("MOONLIGHT_VRR_TRACE", QFile::encodeName(tracePath));
+    qputenv("MOONLIGHT_VRR_DEEP_TRACE", "1");
+    SynchronizedCompositionPresenter backend;
+    backend.setCanLatch(true);
+    auto config = enabledConfig();
+    config.streamRateHz = 116;
+    PacerTelemetry telemetry;
+    TrackedFrameLifetime lifetime[24];
+    {
+        VrrPacingWorker worker(&backend, config, &telemetry);
+        expect(worker.start(), "composition feedback worker must start");
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 24; ++i) {
+            const uint32_t ticks = uint32_t(uint64_t(i) * 90000 / 116);
+            std::this_thread::sleep_until(start + std::chrono::microseconds(uint64_t(ticks) * 100 / 9));
+            worker.submit(makeTrackedPacedFrame(i + 1, ticks, LiGetMicroseconds(), lifetime[i]));
+            expect(backend.waitForPresentCount(size_t(i + 1)),
+                   "composition fixture must submit each frame");
+        }
+        expect(waitFor([&] { return telemetryStats(telemetry).vrrPresentedFrames == 24; }),
+               "composition telemetry must include the final result");
+    }
+    const auto requests = backend.presentRequests();
+    expect(requests.size() == 24 && std::all_of(requests.begin(), requests.end(),
+        [](const VrrPresentRequest& request) { return request.latchedPresentation; }),
+        "the worker must request native synchronization on every composition frame");
+    const auto graph = telemetry.timingGraphSnapshot();
+    size_t displayIntervals = 0;
+    for (size_t i = 0; i < graph.size(); ++i) {
+        uint64_t interval;
+        displayIntervals += Overlay::timingGraphInterval(graph, i, Overlay::TimingGraphLane::Display, interval);
+    }
+    expect(displayIntervals == 22,
+           "delayed composition display events must populate the magenta lane for their own frames");
+    const auto lines = readExpandedTrace(tracePath).split('\n');
+    const auto columns = lines.value(0).split(',');
+    const int capability = columns.indexOf("param_native_synchronized_presentation");
+    expect(capability >= 0 && lines.value(1).split(',').value(capability) == "1",
+           "exact replay must capture the presenter's constant synchronized mode");
+    if (const char* exportPath = SDL_getenv("MOONLIGHT_VRR_TEST_EXPORT_COMPOSITION_TRACE")) {
+        if (*exportPath) expect(QFile::copy(tracePath, QString::fromLocal8Bit(exportPath)),
+                              "composition feedback fixture must export for exact replay");
+    }
+    qputenv("MOONLIGHT_VRR_TRACE", "");
+    qputenv("MOONLIGHT_VRR_DEEP_TRACE", "0");
+}
+
 void testMetalPresentationFeedback()
 {
     for (uint64_t uncertaintyUs : {uint64_t(250), uint64_t(501)}) {
@@ -3011,6 +3092,7 @@ int main()
     testSmoothnessTraceCapturesReadinessPolicy();
     testFailedCancellationNativeEvidenceIsTraced();
     testMetalPresentationFeedback();
+    testSynchronizedCompositionFeedback();
     testMetalFailedPreparationFeedback();
     testReconnectPreservesCompletedTraces();
     testDeepTraceRequestsNativeObservationsWithoutChangingMode();

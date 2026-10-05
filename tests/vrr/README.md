@@ -1,5 +1,16 @@
 # VRR deterministic tests
 
+Windows VRR now prefers the composition presentation API when independent-flip
+capability is available. `native_synchronized_presentation=1` records its
+constant synchronized mode; historical captures default that parameter to zero.
+`tst_vrrtimingcontroller` verifies startup, rate changes and omission of the
+software display-period floor. The worker's composition fixture verifies delayed
+display-ID matching into the magenta graph and can be exported with
+`MOONLIGHT_VRR_TEST_EXPORT_COMPOSITION_TRACE` for an exact replay gate.
+`MOONLIGHT_VRR_COMPOSITION=0` retains the DXGI path for comparisons.
+The native `compositionprobe --run` remains a separate hardware test: capability
+and display coverage do not establish sub-refresh latency or optical VRR.
+
 User-facing Windows/Linux frame tracing and log export is documented in
 [VRR diagnostics](../../docs/vrr-diagnostics.md). `tst_vrrdiagnostics` covers
 the Desktop destination, capture lifetime, external-launcher precedence, Unicode

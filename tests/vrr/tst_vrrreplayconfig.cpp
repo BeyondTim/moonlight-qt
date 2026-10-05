@@ -19,6 +19,7 @@ private slots:
     void offsetRecoveryPolicyRoundTrip();
     void nativeHitchPolicyRoundTrip();
     void displayEventPolicyRoundTrip();
+    void nativeSynchronizationRoundTrip();
     void submissionEstimatePolicyRoundTrip();
     void predictionOnlyPolicyRoundTrip();
     void rateProtectionPolicyRoundTrip();
@@ -904,6 +905,23 @@ void VrrReplayConfigTest::displayEventPolicyRoundTrip()
     snapshot["playout_require_display_events"] = 2;
     QVERIFY(!applyVrrReplayControllerSnapshot(snapshot, parameters, error));
     QCOMPARE(parameters.playoutRequireDisplayEvents, uint64_t(1));
+}
+
+void VrrReplayConfigTest::nativeSynchronizationRoundTrip()
+{
+    VrrTimingParameters parameters;
+    QCOMPARE(parameters.nativeSynchronizedPresentation, uint64_t(0));
+    QString error;
+    const auto native = vrrTimingParametersForSession(VrrSessionConfig{}, true);
+    QVERIFY2(applyVrrReplayControllerSnapshot(vrrTimingParametersToJson(native), parameters, error), qPrintable(error));
+    QCOMPARE(parameters.nativeSynchronizedPresentation, uint64_t(1));
+    QVERIFY(!applyVrrReplayControllerSnapshot({{"native_synchronized_presentation", 2}}, parameters, error));
+    QCOMPARE(parameters.nativeSynchronizedPresentation, uint64_t(1));
+    auto historical = vrrTimingParametersToJson(native);
+    historical.remove("native_synchronized_presentation");
+    parameters = VrrTimingParameters{};
+    QVERIFY2(applyVrrReplayControllerSnapshot(historical, parameters, error), qPrintable(error));
+    QCOMPARE(parameters.nativeSynchronizedPresentation, uint64_t(0));
 }
 
 void VrrReplayConfigTest::submissionEstimatePolicyRoundTrip()

@@ -700,11 +700,12 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
     HRESULT hr;
 
     m_DecoderParams = *params;
-    // The composition API supplies display events, but it does not implement
-    // the controller's per-frame tearing/synchronized presentation choice.
-    // Keep it available for capture comparisons without replacing DXGI VRR.
+    // Prefer native display events and synchronized independent flip when the
+    // OS/driver support it. The worker resolves this presenter's constant
+    // synchronized mode after initialization; DXGI retains per-frame selection.
+    // An explicit zero remains available for diagnostic DXGI comparisons.
     m_CompositionRequested = params->enableVrr &&
-        qgetenv("MOONLIGHT_VRR_COMPOSITION") == "1";
+        qgetenv("MOONLIGHT_VRR_COMPOSITION") != "0";
 
     if (qgetenv("D3D11VA_ENABLED") == "0") {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -896,7 +897,7 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "D3D11 VRR backend enabled: refresh=%d Hz, presentation=%s",
                     m_DecoderParams.vrrDisplayRefreshHz,
-                    m_CompositionPresenter.active() ? "composition diagnostic (native ordering)" :
+                    m_CompositionPresenter.active() ? "composition (synchronized, native display events)" :
                         "DXGI (per-frame tearing/synchronized, estimated timing)");
     }
 

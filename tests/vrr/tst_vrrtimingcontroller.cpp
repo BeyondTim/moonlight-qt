@@ -2855,6 +2855,37 @@ void testLatchedPresentationDropsSoftwareFloor()
            "the legacy policy must keep its spacing floor for replay fidelity");
 }
 
+void testNativeSynchronizedPresentation()
+{
+    for (int rate : {30, 60, 116, 120}) {
+        auto session = config(rate, 120);
+        auto policy = vrrTimingParametersForSession(session, true);
+        expect(policy.nativeSynchronizedPresentation == 1 &&
+                   vrrTimingParametersForSession(session).nativeSynchronizedPresentation == 0,
+               "constant synchronization must be selected from the actual presenter");
+        // An exploratory adaptive-only request cannot turn a synchronized
+        // native presenter into a tearing presenter.
+        policy.playoutAdaptiveOnly = 1;
+        VrrTimingController controller(session, true, policy);
+        for (int i = 0; i < 80; ++i) {
+            const uint32_t rtp = uint32_t(uint64_t(i) * 90000 / rate);
+            const uint64_t at = 1000000 + uint64_t(rtp) * 1000 / 90;
+            const auto d = controller.schedule(frame(i + 1, rtp, true, at), at);
+            expect(d.latchedPresentation,
+                   "native synchronized mode must remain latched at startup and every source rate");
+            controller.noteSubmission(true, false, d.targetUs);
+            expect(controller.earliestSubmissionUs() == 0,
+                   "native synchronization must not add a software display-period wait");
+        }
+        // The capability cannot bypass spacing on an incapable backend.
+        VrrTimingController incapable(session, false, policy);
+        const auto d = incapable.schedule(frame(1, 0, true, 1000000), 1000000);
+        incapable.noteSubmission(true, false, d.targetUs);
+        expect(!d.latchedPresentation && incapable.earliestSubmissionUs() != 0,
+               "an incapable presenter must retain its software floor");
+    }
+}
+
 void testRuntimeParametersChangePolicy()
 {
     VrrTimingController defaults(config(60, 120));
@@ -6958,6 +6989,7 @@ int main()
     testMetronomeIgnoresSingleEarlyOutlier();
     testBurstExclusionKeepsDelayAfterStall();
     testLatchedPresentationDropsSoftwareFloor();
+    testNativeSynchronizedPresentation();
     testRuntimeParametersChangePolicy();
     return failures == 0 ? 0 : 1;
 }

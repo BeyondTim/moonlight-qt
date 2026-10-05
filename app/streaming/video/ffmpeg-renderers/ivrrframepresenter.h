@@ -353,6 +353,14 @@ public:
         return false;
     }
 
+    // The native path synchronizes every present, rather than selecting
+    // tearing or synchronization per frame. Resolve this once at worker
+    // construction so scheduling, feedback and exact replay agree.
+    virtual bool alwaysSynchronizesAdaptivePresent() const
+    {
+        return false;
+    }
+
     // Startup eligibility only. NoFallback means the presenter supports a worker-
     // thread split prepare/present path using its adaptive presentation mode.
     virtual VrrFallbackReason checkSupport() const = 0;

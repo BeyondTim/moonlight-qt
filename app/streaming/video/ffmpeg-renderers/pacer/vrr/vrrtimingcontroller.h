@@ -75,6 +75,8 @@
     X(uint64_t, playout_prediction_enabled, playoutPredictionEnabled, 0) \
     /* 0: historical cadence latch; 1: slot only; 2: slot plus safety headroom. */ \
     X(uint64_t, playout_per_frame_latch, playoutPerFrameLatch, 0) \
+    /* Constant native synchronization is a presenter capability, not a latch choice. */ \
+    X(uint64_t, native_synchronized_presentation, nativeSynchronizedPresentation, 0) \
     X(uint64_t, playout_adaptive_only, playoutAdaptiveOnly, 0) \
     X(uint64_t, playout_rate_protection_enabled, playoutRateProtectionEnabled, 0) \
     X(uint64_t, playout_history_enabled, playoutHistoryEnabled, 0) \
@@ -239,7 +241,7 @@ struct VrrTimingParameters {
 // Resolve mode-dependent production policy once for both the live worker and
 // the replay baseline. Candidate replay configs may still override any field.
 VrrTimingParameters vrrTimingParametersForSession(
-    const VrrSessionConfig& config);
+    const VrrSessionConfig& config, bool nativeSynchronizedPresentation = false);
 
 struct VrrTimingDiagnostics {
     int64_t readinessPhaseUs = 0;

@@ -11803,7 +11803,9 @@ int main(int argc, char* argv[])
                     simulatedConfig.latencyMode = 1;
                 }
                 scenario.controller = vrrTimingParametersForSession(
-                    simulatedConfig);
+                    simulatedConfig, simulatedCanLatch &&
+                        (capturedParameters.nativeSynchronizedPresentation != 0 ||
+                         (nativeBackendDeclared && nativeBackend == kNativeBackendComposition)));
                 // The start seed came from this machine's cache, not policy.
                 scenario.controller.playoutDelayStartSeedUs =
                     capturedParameters.playoutDelayStartSeedUs;

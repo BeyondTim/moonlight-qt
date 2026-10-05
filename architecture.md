@@ -5,8 +5,9 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Current source review baseline: `41d9df5c` plus the macOS drawable-backpressure
-correction in this worktree (2026-10-04). The upstream two-step PyroWave calibration targets, planned-present timing
+Current source review baseline: `8101fd29` plus automatic Windows composition
+presentation and explicit native synchronization in this worktree (2026-10-04).
+The upstream two-step PyroWave calibration targets, planned-present timing
 judgements and below-VRR-floor pause are included. The shared customizable VRR
 settings, Reduce judder readiness bound, above-target shrinkage correction,
 and per-interval excess scoring remain active. Deployment and live smoothness
@@ -1920,7 +1921,7 @@ No checkbox is needed.
 The helper adds no refresh wait or future-frame target; actual Ally latency,
 VRR behavior, HDR, and fullscreen transitions still need hardware validation.
 
-Current Windows presenter policy, updated on 2026-09-09 after `a5500a26`:
+Historical Windows presenter policy, updated on 2026-09-09 after `a5500a26`:
 VRR defaults to the DXGI swapchain so the per-frame latch decision actually
 selects synchronized or tearing-permitted presentation. Composition's native
 ordering does not implement that switch; the 22:27 capture used composition
@@ -1934,7 +1935,19 @@ include the active presenter so their readiness histories cannot cross-seed.
 The capture lost one row and failed exact replay. Exploratory replay favored
 retaining the current per-frame controller over rate protection or adaptive-only
 spacing, but cannot model a change of native backend or prove a visual remedy.
-A fresh gameplay capture is required for that comparison.
+A fresh gameplay capture is required for that comparison. The automatic policy
+below supersedes this diagnostic-only selection.
+
+Current Windows presenter policy (2026-10-04): eligible VRR sessions prefer the
+composition swapchain API on supported Windows 11/WDDM devices. Its native path
+synchronizes every frame; the renderer exposes that capability to the worker,
+which records `native_synchronized_presentation=1` in the controller parameters.
+The controller then reports latched presentation at every source rate, including
+startup and recovery, and omits the extra software display-period floor. This
+corrects the historical mismatch between logical latch transitions and constant
+native synchronization. Unsupported systems and setup failures retain DXGI;
+`MOONLIGHT_VRR_COMPOSITION=0` explicitly selects DXGI for comparison. Neither
+the source buffer nor the GPU readiness dependency is removed by this change.
 
 Current VRR timing choices (introduced after `20fa2bc4`, allowances updated
 2026-10-01): the `VRR timing`
@@ -3371,8 +3384,10 @@ historical replay parameters; missing `playout_require_display_events` defaults
 to zero to preserve old exact baselines. New schema-5 traces additionally record
 `latch_time_kind` (0 unavailable, 1 refresh reference, 2 display event).
 
-The DXGI statistics provider supplies no verified display events. Production
-always uses submission estimates for its client cadence report.
+The DXGI fallback statistics provider supplies no verified display events.
+Production uses submission estimates for its client cadence report; independent-
+flip events from the preferred composition presenter populate the separate
+display graph and present-timing diagnostics.
 Readiness prediction independently adapts padding in both directions. Composition-frame statistics also lack a verified frame
 display instant, so the same estimator covers periods without independent-flip
 events. This lower-confidence timing remains internal telemetry; it does not
@@ -3390,12 +3405,14 @@ Software timing, tearing permission, and modeled active-scanout exposure do not
 confirm an optical tear or its absence. External display measurement is needed
 for that claim.
 
-### 10.4 Diagnostic composition presentation
+### 10.4 Composition presentation and display timing
 
-DXGI is the Windows VRR default. Only `MOONLIGHT_VRR_COMPOSITION=1` enables
-composition device flags and attempts to initialize the composition presenter.
-The value is captured during renderer initialization, so a stream reconnect is
-required. Startup logs identify the actual presenter, including setup fallback.
+Eligible Windows VRR sessions attempt the composition presenter by default.
+`MOONLIGHT_VRR_COMPOSITION=0` disables the attempt; `1` retains its previous
+explicit opt-in behavior. The value is captured during renderer initialization,
+so a stream reconnect is required. Startup logs identify the actual presenter,
+including setup fallback. Hardware support permits independent flip but does
+not prove that every live present uses it.
 
 The renderer checks the actual OS version using `RtlGetVersion` (including
 revision 194 on build 22000), loads `CreatePresentationFactory` dynamically,
@@ -3423,14 +3440,33 @@ source ID, and increasing present ID become display events. Their 100 ns system-
 timestamps are correlated with scaled QPC through a fresh bracket on the worker
 clock, with bounded age and uncertainty. Composition statistics do not become
 display events. The backend is trace value 3; DXGI flags, query results, and raw
-QPC fields remain unset. Native ordering lets the controller omit the software
-floor for a protected slot, as on DXGI, without claiming DXGI flag switching. Resize replaces
+QPC fields remain unset. The explicit `native_synchronized_presentation` flag
+keeps every controller decision latched and omits the software floor without
+claiming DXGI flag switching. Missing flags default to zero for historical exact
+replay; session-policy replay resolves the current composition capability.
+Resize replaces
 buffers; display changes recreate the renderer and its output identity.
 
 `compositionprobe --run` is an optional fullscreen Windows hardware diagnostic
 for independent-flip coverage and submission-to-display latency. It does not
-prove optical VRR, tear freedom, or end-to-end latency. No live hardware result
-is claimed by the platform-neutral tests or cross-compilation.
+prove optical VRR, tear freedom, or end-to-end latency. The 2026-10-04 native
+ALLYTWO probe confirmed independent-flip coverage with no rejected timestamps
+or unavailable buffers. At 116 FPS/120 Hz, steady-state coverage was 464/465,
+submission-to-display p50 was 7.057 ms and p99 was 15.968 ms. Its strict
+below-one-refresh p99 gate failed (exit 2); native capability does not guarantee
+sub-refresh latency or live VRR cadence. The 60 FPS probe also failed that gate.
+These are synthetic presenter observations, not gameplay or optical validation.
+
+Windows integration validation for this update: the incremental application
+build and diagnostics build pass. All six required VRR suites, DXGI call-boundary
+and presentation-clock suites pass. The overlay check passes on retry after a
+stats-only asynchronous assertion in the unchanged fixture. The new composition
+worker fixture populates 22 matched display intervals for 24 submissions and
+passes schema-5 exact replay, as does the existing worker fixture. The newest
+completed capture in the canonical trace roots (`20260926-131302-979`) remains
+exploratory: old and new replay both exit 3 with identical fidelity results
+(6,622 exact targets and tear classifications, 6,621 exact submissions). This
+change has not been validated in a new live gameplay stream.
 
 ## 11. Other presentation paths
 

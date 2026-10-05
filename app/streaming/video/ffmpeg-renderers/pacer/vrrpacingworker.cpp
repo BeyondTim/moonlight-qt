@@ -171,9 +171,11 @@ VrrPacingWorker::VrrPacingWorker(IVrrFramePresenter* presenter,
     m_Config(config),
     m_CanLatchPresentation(presenter != nullptr &&
                            presenter->canLatchAdaptivePresent()),
+    m_NativeSynchronizedPresentation(m_CanLatchPresentation &&
+        presenter->alwaysSynchronizesAdaptivePresent()),
     m_TimingController(std::make_unique<VrrTimingController>(
         config, m_CanLatchPresentation,
-        vrrTimingParametersForSession(config)))
+        vrrTimingParametersForSession(config, m_NativeSynchronizedPresentation)))
 {
     // Settings enables tracing after SDL initialization. SDL2-compat may cache
     // its environment, so read the current process value just like the path.
@@ -1449,7 +1451,8 @@ void VrrPacingWorker::writeTraceRow(const TraceRow& row)
     // this row's policy from immutable session settings and its captured mode.
     auto traceConfig = m_Config;
     traceConfig.latencyMode = row.latencyMode;
-    const VrrTimingParameters parameters = vrrTimingParametersForSession(traceConfig);
+    const VrrTimingParameters parameters = vrrTimingParametersForSession(
+        traceConfig, m_NativeSynchronizedPresentation);
     const VrrPresentFeedback& feedback = row.feedback;
     const FrameTelemetry& telemetry = row.telemetry;
     const uint64_t nativePresentDurationUs =
