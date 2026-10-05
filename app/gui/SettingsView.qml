@@ -893,7 +893,7 @@ Flickable {
                     }
                 }
 
-                Button {
+                CalibrationButton {
                     objectName: "pyrowaveCalibrationOpen"
                     text: qsTr("Calibrate PyroWave…")
                     visible: SystemProperties.hasPyroWave && slider.pyroWave
@@ -1142,7 +1142,7 @@ Flickable {
                         padding: 12
                         contentItem: RowLayout {
                             spacing: 8
-                            Button {
+                            CalibrationButton {
                                 id: calibrationRunButton
                                 objectName: "pyrowaveCalibrationRun"
                                 text: PyroWaveCalibrator.running ? (calibrationDialog.stopRequested ? qsTr("Stopping…") : qsTr("Stop test")) :
@@ -1180,7 +1180,7 @@ Flickable {
                                     event.accepted = true
                                 }
                             }
-                            Button {
+                            CalibrationButton {
                                 id: calibrationDetails
                                 objectName: "pyrowaveCalibrationDetails"
                                 visible: calibrationDialog.step === 1
@@ -1194,7 +1194,7 @@ Flickable {
                                 Keys.onDownPressed: calibrationDialog.focusOption(0, 0, 1)
                             }
                             Item { Layout.fillWidth: true }
-                            Button {
+                            CalibrationButton {
                                 id: calibrationCloseButton
                                 objectName: "pyrowaveCalibrationBack"
                                 text: calibrationDialog.step === 0 ? qsTr("Cancel") : qsTr("Back")
@@ -1209,7 +1209,7 @@ Flickable {
                                     else calibrationRunButton.forceActiveFocus(Qt.TabFocusReason)
                                 }
                             }
-                            Button {
+                            CalibrationButton {
                                 id: calibrationNextButton
                                 objectName: "pyrowaveCalibrationNext"
                                 text: qsTr("Next →")
@@ -1269,7 +1269,7 @@ Flickable {
                                 Repeater {
                                     id: calibrationTargets
                                     model: calibrationDialog.targets
-                                    delegate: Button {
+                                    delegate: CalibrationButton {
                                         id: targetCard
                                         objectName: "pyrowaveCalibrationTarget" + index
                                         Layout.fillWidth: true
@@ -1285,12 +1285,12 @@ Flickable {
                                             spacing: 6
                                             Label {
                                                 width: parent.width
-                                                text: targetCard.text
+                                                text: (targetCard.checked ? "\u2713 " : "") + targetCard.text
                                                 font.bold: targetCard.checked
                                                 font.pointSize: 11
                                                 horizontalAlignment: Text.AlignHCenter
                                                 elide: Text.ElideRight
-                                                color: targetCard.checked ? "#e1bee7" : "#ffffff"
+                                                color: "#ffffff"
                                             }
                                             Label {
                                                 width: parent.width
@@ -1301,13 +1301,7 @@ Flickable {
                                                 color: "#c7c7c7"
                                             }
                                         }
-                                        background: Rectangle {
-                                            radius: 8
-                                            color: targetCard.checked ? "#51405c" : "#383838"
-                                            border.width: targetCard.activeFocus ? 3 : 1
-                                            border.color: targetCard.activeFocus ? "#e1bee7" : targetCard.checked ? "#ab75c3" : "#606060"
-                                            opacity: targetCard.enabled ? 1 : 0.6
-                                        }
+                                        opacity: targetCard.enabled ? 1 : 0.6
                                         onClicked: calibrationDialog.changeTarget(index)
                                         Keys.priority: Keys.BeforeItem
                                         Keys.onPressed: function(event) {
@@ -1542,7 +1536,7 @@ Flickable {
                                                     Repeater {
                                                         id: calibrationFormats
                                                         model: chromaColumn.modes
-                                                        delegate: Button {
+                                                        delegate: CalibrationButton {
                                                             id: optionButton
                                                             objectName: "pyrowaveCalibrationOption" + (calibrationRow.rowIndex * 4 + modelData)
                                                             width: parent.width
@@ -1554,13 +1548,6 @@ Flickable {
                                                             bottomInset: 0
                                                             leftInset: 0
                                                             rightInset: 0
-                                                            background: Rectangle {
-                                                                radius: 6
-                                                                color: optionButton.activeFocus ? "#484454" : "#383838"
-                                                                border.width: optionButton.activeFocus ? 2 : 1
-                                                                border.color: optionButton.activeFocus ? "#ce93d8" : "#505050"
-                                                                opacity: optionButton.enabled ? 1 : 0.55
-                                                            }
                                                             readonly property var option: calibrationDialog.sample(calibrationRow.rowIndex, modelData)
                                                             readonly property bool hdr: modelData % 2 === 0
                                                             enabled: calibrationDialog.canApply(option)
@@ -1591,7 +1578,7 @@ Flickable {
 
                                                             contentItem: Column {
                                                                 spacing: 2
-                                                                opacity: !optionButton.enabled ? 0.6 : optionButton.option && !optionButton.option.keepsUp ? 0.7 : 1.0
+                                                                opacity: !optionButton.enabled ? 0.6 : optionButton.activeFocus || optionButton.hovered ? 1.0 : optionButton.option && !optionButton.option.keepsUp ? 0.7 : 1.0
 
                                                                 Label {
                                                                     width: parent.width
