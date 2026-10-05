@@ -6,7 +6,8 @@ It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
 Current source review baseline: `8101fd29` plus automatic Windows composition
-presentation and explicit native synchronization in this worktree (2026-10-04).
+presentation, explicit native synchronization and continuous D3D11 overlay
+publication in this worktree (2026-10-04).
 The upstream two-step PyroWave calibration targets, planned-present timing
 judgements and below-VRR-floor pause are included. The shared customizable VRR
 settings, Reduce judder readiness bound, above-target shrinkage correction,
@@ -4098,6 +4099,20 @@ overlay worker draws the lanes into the existing debug-overlay surface shared by
 the surface-based renderer APIs, so renderer overlay uploads occur at up to
 10 Hz while stats are shown. Controller targets, buffer policy and trace schema
 are unchanged by this chart.
+
+Windows D3D11 overlay publication (2026-10-04): the renderer retains the last
+complete texture, shader-resource view and vertex buffer while the overlay
+worker creates a replacement. It swaps all three references together only
+after successful creation, and releases retired resources outside the lock.
+Resource-creation failures preserve the previous graph. Rendering takes the
+short reference lock instead of skipping the overlay on lock contention;
+window-resize resource reconstruction is already excluded from rendering by
+the presentation lock. The previous remove-before-upload path left graph-free
+frames during each refresh, causing visible flicker at the graph's 10 Hz
+update rate. The incremental Windows release build, overlay suite and six required
+VRR suites pass. The ChaseShare portable tree and ZIP were updated with matching
+SHA-256 hashes and a successful UNC replay help check. Live visual confirmation
+of the graph during streaming remains pending.
 
 At 4K drawable output (at least 3840 by 2160 pixels, in either orientation), the
 stats font increases from 20 to 26 pixels. Graph dimensions, strokes, text wrap

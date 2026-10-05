@@ -1041,13 +1041,10 @@ void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
         return;
     }
 
-    // If the overlay is being updated, just skip rendering it this frame
-    if (!SDL_AtomicTryLock(&m_OverlayLock)) {
-        return;
-    }
-
     // Reference these objects so they don't immediately go away if the
-    // overlay update thread tries to release them.
+    // overlay update thread tries to release them. Updates only hold this
+    // lock while swapping references, so contention must not hide the overlay.
+    SDL_AtomicLock(&m_OverlayLock);
     ComPtr<ID3D11Texture2D> overlayTexture = m_OverlayTextures[type];
     ComPtr<ID3D11Buffer> overlayVertexBuffer = m_OverlayVertexBuffers[type];
     ComPtr<ID3D11ShaderResourceView> overlayTextureResourceView = m_OverlayTextureResourceViews[type];
@@ -1598,14 +1595,20 @@ void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         return;
     }
 
-    SDL_AtomicLock(&m_OverlayLock);
-    ComPtr<ID3D11Texture2D> oldTexture = std::move(m_OverlayTextures[type]);
-    ComPtr<ID3D11Buffer> oldVertexBuffer = std::move(m_OverlayVertexBuffers[type]);
-    ComPtr<ID3D11ShaderResourceView> oldTextureResourceView = std::move(m_OverlayTextureResourceViews[type]);
-    SDL_AtomicUnlock(&m_OverlayLock);
+    // Keep the published resources intact while building their replacement.
+    // In particular, the 10 Hz graph updates must not leave frames with no
+    // overlay during texture upload, or erase it if resource creation fails.
+    ComPtr<ID3D11Texture2D> oldTexture;
+    ComPtr<ID3D11Buffer> oldVertexBuffer;
+    ComPtr<ID3D11ShaderResourceView> oldTextureResourceView;
 
     // If the overlay is disabled, we're done
     if (!overlayEnabled) {
+        SDL_AtomicLock(&m_OverlayLock);
+        oldTexture = std::move(m_OverlayTextures[type]);
+        oldVertexBuffer = std::move(m_OverlayVertexBuffers[type]);
+        oldTextureResourceView = std::move(m_OverlayTextureResourceViews[type]);
+        SDL_AtomicUnlock(&m_OverlayLock);
         SDL_FreeSurface(newSurface);
         return;
     }
@@ -1662,6 +1665,11 @@ void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     newSurface = nullptr;
 
     SDL_AtomicLock(&m_OverlayLock);
+    // Retire the previous set outside the lock; COM destruction can call into
+    // the driver. Publish the complete replacement as one consistent set.
+    oldTexture = std::move(m_OverlayTextures[type]);
+    oldVertexBuffer = std::move(m_OverlayVertexBuffers[type]);
+    oldTextureResourceView = std::move(m_OverlayTextureResourceViews[type]);
     m_OverlayVertexBuffers[type] = std::move(newVertexBuffer);
     m_OverlayTextures[type] = std::move(newTexture);
     m_OverlayTextureResourceViews[type] = std::move(newTextureResourceView);
