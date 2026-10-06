@@ -3754,7 +3754,7 @@ queued audio latency. Muting can suppress audio processing without retiming VRR.
 
 Input goes from SDL handlers to common-library input APIs and a separate sender.
 
-Windows/Linux DualSense waveform feedback (updated 2026-10-02) runs separately
+Windows/Linux DualSense waveform feedback (updated 2026-10-05) runs separately
 from video and ordinary stream audio. A Bluetooth Sony DualSense/Edge with an
 exact SDL HID device path can advertise controller capability
 `LI_CCAP_HAPTICS_PCM` (`0x8000`) after its output backend opens successfully.
@@ -3786,16 +3786,27 @@ Shared-mode conversion uses the endpoint's channel mask. Startup buffers 10 ms
 the requested 20 ms engine buffer. The actual engine buffer size is queried.
 Idle output drains to silence, and disconnect joins the worker before SDL closes
 the controller. Linux USB and other platforms keep ordinary rumble. Native game
-haptics
-must originate from the Linux Vibeshine host's controller
-audio endpoint; game soundtrack audio is not a substitute.
+haptics must originate from the host's controller audio endpoint. Linux uses
+its composite DS5; Windows uses the optional local usbip-win2 composite DS5,
+selected per application with `dualsense-haptics` or globally with `usbip_ds5`.
+The wired host identity is independent of the physical client's USB/Bluetooth
+connection. USB/IP stays on the Windows host; no USB/IP transport is required
+on the Moonlight client. Game soundtrack audio is not a substitute.
 
 Bluetooth playback drops old/duplicate packets, resets conversion history on
 packet loss,
 bounds its input and converted queues, sends silence on underflow/idle/removal,
 and joins its worker before SDL closes the controller. It cancels SDL emulated
 rumble when waveform playback starts and suppresses legacy rumble while active;
-LED, motion and adaptive-trigger callbacks retain their own paths. Write failure
+LED, motion and adaptive-trigger callbacks retain their own paths. Shared
+receive admission rejects late/duplicate sequences, including wrap, before
+changing rumble priority; the sequence remains tracked across idle silence.
+A silent PCM stream cannot start playback. Both workers idle 60 ms after the
+last nonzero actuator sample, send/drain final silence, and stay inactive while
+an open host audio endpoint continues to submit zeros. This prevents silent
+audio from indefinitely suppressing rumble or overwriting it with silent
+Bluetooth reports. Windows HID transport includes the SDK before SDL so
+`CancelIoEx` remains declared when compiled separately. Write failure
 stops that waveform worker and logs the need to reconnect; ordinary controller
 input continues. Hardware coexistence with other applications writing the same
 controller still requires physical testing. The USB backend has not been validated

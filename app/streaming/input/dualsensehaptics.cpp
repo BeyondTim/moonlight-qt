@@ -50,7 +50,9 @@ struct Backend {
     bool stopped = false;
     bool failed = false;
     bool waveformMode = false;
-    Clock::time_point lastReceived {};
+    Clock::time_point lastNonzero {};
+    uint32_t latestSequence = 0;
+    bool haveInputSequence = false;
 
     virtual ~Backend() = default;
     virtual void notify() = 0; // Called with mutex held.
@@ -63,11 +65,25 @@ struct Backend {
     void receive(uint32_t sequence, const uint8_t* pcm, uint16_t frames) {
         std::lock_guard<std::mutex> guard(mutex);
         if (stopped || failed) return;
+        // Filter before rumble priority or idle timers are changed. Ingress
+        // retains sequence across idle silence, so delayed PCM cannot restart
+        // an effect the host has already ended. Unsigned subtraction wraps.
+        if (haveInputSequence && int32_t(sequence - latestSequence) <= 0) return;
+        latestSequence = sequence;
+        haveInputSequence = true;
+        const auto now = Clock::now();
+        const bool nonzero = std::any_of(pcm, pcm + frames * 4u,
+                                        [](uint8_t sample) { return sample != 0; });
+        if (nonzero) lastNonzero = now;
+        // An open USB audio endpoint can send zeros indefinitely. Once the
+        // effect has drained, those packets must neither acquire rumble
+        // priority nor keep writing silence over ordinary rumble commands.
+        if (!nonzero && !waveformMode && queue.empty()) return;
         // Overflow discards old audio; bounded memory and bounded playout latency.
         if (queue.size() >= 8) queue.clear();
         Chunk chunk {};
         chunk.sequence = sequence; chunk.frames = frames;
-        chunk.received = lastReceived = Clock::now();
+        chunk.received = now;
         memcpy(chunk.pcm.data(), pcm, frames * 4);
         queue.push_back(chunk);
         notify();
@@ -146,7 +162,7 @@ struct Playback final : Backend {
                 SDL_AudioStreamGet(converter, samples, sizeof(samples)) != sizeof(samples)) {
                 failed = true; break;
             }
-            const bool idle = now - lastReceived > std::chrono::milliseconds(60);
+            const bool idle = now - lastNonzero > std::chrono::milliseconds(60);
             if (idle) {
                 SDL_AudioStreamClear(converter);
                 memset(samples, 0, sizeof(samples));
@@ -343,7 +359,7 @@ struct WasapiPlayback final : Backend {
             }
             if (fifo.size() > maxFrames * 2)
                 fifo.erase(fifo.begin(), fifo.end() - prebufferFrames * 2);
-            if (active && now - lastReceived > idleTimeout) {
+            if (active && now - lastNonzero > idleTimeout) {
                 // Already-submitted samples drain; afterwards the engine renders silence.
                 fifo.clear();
                 active = false; started = false; haveSequence = false;
