@@ -3780,6 +3780,13 @@ The client also advertises `ML_FF_HAPTICS_PCM` (`0x04`) in SDP. Vibeshine captur
 channel `0x08`. Both flags and the versioned payload are a coordinated extension
 in these forks; they are not an upstream Moonlight protocol guarantee.
 
+The session registers the waveform receive callback on both Windows and Linux
+with SDL 2.24 or newer. The common library advertises the SDP flag only when
+that callback is present; enabling the controller backend alone cannot enable
+waveform delivery. A Linux-only session callback guard previously left Windows
+controllers advertising `LI_CCAP_HAPTICS_PCM` while the connection omitted
+`ML_FF_HAPTICS_PCM`, so the host discarded their PCM feedback.
+
 The receive callback validates exact length, version, format, controller range,
 reserved fields and sample count before copying into a bounded per-controller
 queue. It never accesses Session/InputHandler objects that may be tearing down.

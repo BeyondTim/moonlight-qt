@@ -73,7 +73,7 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers,
-#if defined(Q_OS_LINUX) && SDL_VERSION_ATLEAST(2, 24, 0)
+#if (defined(Q_OS_LINUX) || defined(Q_OS_WIN)) && SDL_VERSION_ATLEAST(2, 24, 0)
     DualSenseHaptics::receive
 #else
     nullptr
