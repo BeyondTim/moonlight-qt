@@ -12,7 +12,6 @@
 #include "backend/richpresencemanager.h"
 #include "streaming/gpuperformancehold.h"
 #include "backend/networkbuffers.h"
-#include "video/pyrowave/pyrowavepacketlosswarning.h"
 
 #include <Limelight.h>
 #include "SDL_compat.h"
@@ -200,8 +199,6 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
     {
     case CONN_STATUS_POOR:
         s_ActiveSession->m_OverlayManager.setStatusMessage(Overlay::StatusSource::Network,
-                                                            (s_ActiveSession->m_ActiveVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ?
-                                                                PyroWavePacketLossWarning::Message :
                                                             s_ActiveSession->m_StreamConfig.bitrate > 5000 ?
                                                                 "Slow connection to PC\nReduce your bitrate" : "Poor connection to PC");
         break;

@@ -178,11 +178,11 @@ int main(int argc, char** argv)
     {
         PyroWavePacketLossWarning warning;
         uint64_t now = 1000000;
-        // 100 FPS: each completed window has exactly 300 delivered frames.
-        const auto window = [&](unsigned partialPercent) {
+        // 100 FPS, 100 packets/frame: each window has 30,000 data packets.
+        const auto window = [&](unsigned lossPercent) {
             bool visible = false;
             for (unsigned frame = 0; frame < 300; ++frame) {
-                visible = warning.observe(now, true, frame % 100 < partialPercent);
+                visible = warning.observe(now, true, 100, lossPercent);
                 now += 10000;
             }
             return visible;
@@ -198,12 +198,35 @@ int main(int argc, char** argv)
         assert(!window(0));
         assert(!window(100));
         assert(window(100));
-        assert(!warning.observe(now, false, true)); // Preference/codec disables.
+        assert(!warning.observe(now, false, 100, 100)); // Preference/codec disables.
         assert(!window(100));
         assert(window(100));
         now += 3000000;
-        assert(!warning.observe(now, true, true)); // Restart after a reporting gap.
-        assert(!warning.observe(now - 1, true, true)); // Restart after clock reversal.
+        assert(!warning.observe(now, true, 100, 100)); // Restart after a reporting gap.
+        assert(!warning.observe(now - 1, true, 100, 100)); // Restart after clock reversal.
+    }
+    {
+        PyroWavePacketLossWarning warning;
+        uint64_t now = 1000000;
+        // Every frame has a hole, but only 0.1% of packets are missing.
+        for (unsigned frame = 0; frame < 1200; ++frame, now += 10000)
+            assert(!warning.observe(now, true, 1000, 1));
+        // A third of frames lose every packet. Those tiny frames must not
+        // outweigh the intact large frames (100 / 200100 packets per window).
+        for (unsigned frame = 0; frame < 1200; ++frame, now += 10000)
+            assert(!warning.observe(now, true, frame % 3 ? 1000 : 1, frame % 3 ? 0 : 1));
+        // Conversely, a few large lossy frames can dominate the packet count
+        // even when most delivered frames are intact.
+        warning = {};
+        for (unsigned frame = 0; frame < 300; ++frame, now += 10000)
+            assert(!warning.observe(now, true, frame % 10 ? 1 : 1000, frame % 10 ? 0 : 300));
+        // 9000 / 30270 = 29.73%, just below the immediate threshold.
+        assert(!warning.observe(now, true, 1, 0));
+        warning = {};
+        for (unsigned frame = 0; frame < 300; ++frame, now += 10000)
+            assert(!warning.observe(now, true, frame % 10 ? 1 : 1000, frame % 10 ? 0 : 310));
+        assert(warning.observe(now, true, 1, 0)); // 9300 / 30270 = 30.72%.
+        assert(warning.observe(now + 10000, true, 0, 0)); // No invented recovery sample.
     }
     {
         using Reason = ClientPacingWarning::Reason;

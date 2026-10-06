@@ -2968,17 +2968,17 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     // Observe every delivered PyroWave frame before stale-frame shedding or
     // decoding. Missing detail can shimmer without dropping a whole frame.
     if (!m_TestOnly) {
-        bool partial = false;
+        uint64_t totalPackets = 0, lostPackets = 0;
         if (m_PyroWaveActive) {
+            // PyroWave depacketization preserves one entry per data packet,
+            // including placeholders for holes that FEC could not recover.
             for (PLENTRY packet = du->bufferList; packet != nullptr; packet = packet->next) {
-                if (packet->bufferType == BUFFER_TYPE_LOST) {
-                    partial = true;
-                    break;
-                }
+                ++totalPackets;
+                lostPackets += packet->bufferType == BUFFER_TYPE_LOST;
             }
         }
         const bool visible = m_PyroWavePacketLossWarning.observe(LiGetMicroseconds(),
-            m_PyroWaveActive && Session::get()->clientPacingWarningsEnabled(), partial);
+            m_PyroWaveActive && Session::get()->clientPacingWarningsEnabled(), totalPackets, lostPackets);
         Session::get()->getOverlayManager().setStatusMessage(Overlay::StatusSource::PacketLoss,
             visible ? PyroWavePacketLossWarning::Message : "");
     }

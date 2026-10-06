@@ -5,8 +5,8 @@ of a session working on streaming, decoding, rendering, VRR, latency, or replay.
 It explains the implementation and the reasoning needed to investigate it;
 it does not establish that a particular deployed executable matches the source.
 
-Current source review baseline: `54cdfaef` plus the paired-HTTPS UDP calibration
-handshake in this worktree (2026-10-04). Automatic Windows composition
+Current source review baseline: `3cb67d3e` plus the packet-count shimmering
+warning correction in this worktree (2026-10-05). Automatic Windows composition
 presentation, explicit native synchronization and continuous D3D11 overlay
 publication are included.
 The upstream two-step PyroWave calibration targets, planned-present timing
@@ -1399,20 +1399,25 @@ clear the others. Client pacing counters do not feed the network frame-gap
 counter or the transport connection callback. Those existing delivery-loss
 signals do not diagnose a specific network component or internal GPU cause.
 
-PyroWave packet-loss warning (2026-10-05, `ed757879` plus this worktree):
+PyroWave packet-loss warning (2026-10-05, `3cb67d3e` plus this worktree):
 the decoder observes `BUFFER_TYPE_LOST` payload holes before decoding or
 stale-frame shedding, independently of the stats overlay and VRR selection.
-Partial frames count as affected even when they display successfully. Following
-the transport warning's thresholds, a three-second window with at least 30%
-affected frames, or two consecutive windows with at least 15%, shows red text:
+PyroWave depacketization preserves one entry per video data packet, including
+lost placeholders. The observer sums missing and total packet counts across all
+delivered frames, rather than counting frames with any missing detail or averaging
+per-frame percentages. Following the transport warning's numerical thresholds,
+a three-second window with at least 30% missing packets, or two consecutive
+windows with at least 15%, shows red text:
 "Severe packet loss detected / Reduce bitrate to prevent shimmering".
 A window at or below 5% clears this source; a reporting gap over 2.5 seconds,
 decoder reset, or disabled connection warnings restarts qualification. This is
-the percentage of delivered frames with unrecovered holes, not a raw network
-packet-loss percentage or a diagnosis of where packets disappeared. Fully
-recovered FEC packets do not qualify. The transport's whole-frame-loss callback
-uses the same text for the negotiated PyroWave codec. Both sources retain their
-own state and identical text is displayed once, alongside client pacing warnings;
+the percentage of video data packets missing from delivered frames after FEC,
+not a raw network packet-loss percentage or a diagnosis of where packets
+disappeared. Fully recovered FEC packets do not qualify, and parity packets and
+wholly dropped frames are outside this observer's denominator. The transport's
+whole-frame-loss callback retains the ordinary slow/poor connection text;
+it cannot trigger the shimmering message. Both sources retain their own state,
+alongside client pacing warnings;
 mouse-mode priority is unchanged. No bitrate changes automatically.
 
 ### Cross-platform ownership and buffer-attribution correction (2026-09-19)
