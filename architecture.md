@@ -1399,6 +1399,22 @@ clear the others. Client pacing counters do not feed the network frame-gap
 counter or the transport connection callback. Those existing delivery-loss
 signals do not diagnose a specific network component or internal GPU cause.
 
+PyroWave packet-loss warning (2026-10-05, `ed757879` plus this worktree):
+the decoder observes `BUFFER_TYPE_LOST` payload holes before decoding or
+stale-frame shedding, independently of the stats overlay and VRR selection.
+Partial frames count as affected even when they display successfully. Following
+the transport warning's thresholds, a three-second window with at least 30%
+affected frames, or two consecutive windows with at least 15%, shows red text:
+"Severe packet loss detected / Reduce bitrate to prevent shimmering".
+A window at or below 5% clears this source; a reporting gap over 2.5 seconds,
+decoder reset, or disabled connection warnings restarts qualification. This is
+the percentage of delivered frames with unrecovered holes, not a raw network
+packet-loss percentage or a diagnosis of where packets disappeared. Fully
+recovered FEC packets do not qualify. The transport's whole-frame-loss callback
+uses the same text for the negotiated PyroWave codec. Both sources retain their
+own state and identical text is displayed once, alongside client pacing warnings;
+mouse-mode priority is unchanged. No bitrate changes automatically.
+
 ### Cross-platform ownership and buffer-attribution correction (2026-09-19)
 
 Production source-clock mapping now uses immutable `decoderOutputUs`. A worker or
