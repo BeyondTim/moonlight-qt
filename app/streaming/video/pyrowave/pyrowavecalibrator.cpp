@@ -670,7 +670,8 @@ private:
 // Test the selected target directly, lowering it only when fresh measurements
 // establish a useful reduction in device cost.
 Sample calibrateFormat(pyrowave_device device, Renderer& renderer, int width, int height, int fps,
-                       bool chroma444, bool hdr, int linkCapKbps, PyroWaveCalibration::Target target,
+                       bool chroma444, bool hdr, int linkCapKbps, int linkSpeedKbps,
+                       PyroWaveCalibration::Target target,
                        const pyrowave::bandwidth::transport_t& transport,
                        const std::atomic<bool>& cancelled)
 {
@@ -680,7 +681,8 @@ Sample calibrateFormat(pyrowave_device device, Renderer& renderer, int width, in
     sample.chroma444 = chroma444;
     sample.hdr = hdr;
     sample.guideKbps = pyroWaveRecommendedKbps(width, height, fps, chroma444, hdr);
-    const int wireCapKbps = PyroWaveCalibration::wireTarget(target, linkCapKbps);
+    const int wireCapKbps = PyroWaveCalibration::wireTarget(target, linkCapKbps, linkSpeedKbps,
+        PyroWaveCalibration::roundUp(pyrowave::bandwidth::total_kbps(sample.guideKbps, fps, transport)));
     const int imageCapKbps = PyroWaveCalibration::imageCapacity(wireCapKbps, fps, transport);
     if (imageCapKbps < 5000) {
         sample.error = QStringLiteral("Not enough stable bandwidth after FEC and packet overhead");
@@ -740,7 +742,8 @@ Sample calibrateFormat(pyrowave_device device, Renderer& renderer, int width, in
     return sample;
 }
 
-QString runSweep(int fps, int displayWidth, int displayHeight, int linkCapKbps, PyroWaveCalibration::Target target,
+QString runSweep(int fps, int displayWidth, int displayHeight, int linkCapKbps, int linkSpeedKbps,
+                 PyroWaveCalibration::Target target,
                  const pyrowave::bandwidth::transport_t& transport,
                  const std::atomic<bool>& cancelled, const std::function<void(const Sample&)>& report)
 {
@@ -760,7 +763,8 @@ QString runSweep(int fps, int displayWidth, int displayHeight, int linkCapKbps, 
                     for (bool hdr : {true, false}) {
                         if (cancelled.load()) break;
                         const Sample sample = calibrateFormat(device, renderer, resolution[0], resolution[1],
-                                                              fps, chroma444, hdr, linkCapKbps, target, transport, cancelled);
+                                                              fps, chroma444, hdr, linkCapKbps, linkSpeedKbps,
+                                                              target, transport, cancelled);
                         // A format cut short by cancellation has no result
                         if (cancelled.load()) break;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -859,7 +863,9 @@ QString PyroWaveCalibrator::bandwidthQuality() const
     if (!m_BandwidthReady) return QString();
     const auto target = static_cast<PyroWaveCalibration::Target>(m_Target);
     const int image = PyroWaveCalibration::imageCapacity(
-        PyroWaveCalibration::wireTarget(target, m_LinkCapKbps), m_Fps, m_Transport);
+        PyroWaveCalibration::wireTarget(target, m_LinkCapKbps, m_LinkSpeedKbps,
+            PyroWaveCalibration::roundUp(pyrowave::bandwidth::total_kbps(m_RecommendedImageKbps, m_Fps, m_Transport))),
+        m_Fps, m_Transport);
     switch (PyroWaveCalibration::imageQuality(target, image, m_RecommendedImageKbps)) {
     case PyroWaveCalibration::MeetsTarget: return QStringLiteral("target");
     case PyroWaveCalibration::ReducedQuality: return QStringLiteral("reduced");
@@ -874,6 +880,8 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
     if (m_Running || m_Worker) return;
     m_BandwidthReady = false;
     m_LinkCapKbps = 0;
+    m_LinkSpeedKbps = 0;
+    m_PaceMbps = 0;
     m_LinkSummary.clear();
     if (bitrateTarget < Minimum || bitrateTarget > Maximum) {
         m_Results.clear();
@@ -970,11 +978,15 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
 
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
     m_Cancel = cancelled;
+    const int recommendedImageKbps = m_RecommendedImageKbps;
     m_Worker = QThread::create([this, fps, linkMbps,
                                 hostAddress, hostHttpsPort, hostCertificate, hostName,
-                                useTrueUid, target, packetSize, cancelled] {
+                                useTrueUid, target, packetSize, recommendedImageKbps, cancelled] {
         int hostLinkMbps = 0;
         PyroWaveLink::Result link;
+        PyroWaveLink::PaceResult pace;
+        QString paceNote;
+        int linkSpeedKbps = 0;
         pyrowave::bandwidth::transport_t transport;
         transport.packetsize = packetSize;
         try {
@@ -1017,6 +1029,21 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
                 }
                 capKbps = (std::min)(capKbps, (std::max)(5000, neededKbps));
             }
+            else if (target == PyroWaveCalibration::Moderate && (hostLinkMbps > 0 || linkMbps > 0)) {
+                // Search only as high as the preset can use: 60% of the link
+                // or the largest Recommended rate in the matrix, whichever is
+                // higher, plus the 5% confirmation margin. Below it, the
+                // search confirms the highest rate the path sustains.
+                int neededKbps = PyroWaveCalibration::roundUp(
+                    PyroWaveCalibration::roundDown(capKbps * 0.6) / 0.95);
+                for (const auto& resolution : kResolutions) {
+                    for (bool chroma444 : {true, false}) for (bool hdr : {true, false}) {
+                        neededKbps = (std::max)(neededKbps, PyroWaveCalibration::qualityProbeCeiling(
+                            pyroWaveRecommendedKbps(resolution[0], resolution[1], fps, chroma444, hdr), fps, transport));
+                    }
+                }
+                capKbps = (std::min)(capKbps, neededKbps);
+            }
             // Starting at the bounded ceiling avoids a slow upward staircase.
             // Search precision, probe duration and two confirmations are intact.
             link = PyroWaveLink::search(capKbps, capKbps, [&](int kbps) {
@@ -1028,10 +1055,12 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "PyroWave UDP probe: %d kbps, sent %u/%u, received %u, loss %.3f%%, worst 100ms %.3f%%, "
                     "delay p99 %.2f ms, growth %.2f ms, host duration %.2f ms, receiver read delay p99 %.2f ms, "
-                    "kernel arrivals %d: capacity %s, timing %s (%s)", kbps, result.sent, result.expected,
+                    "kernel arrivals %d, host send retries %u, host send error %d: capacity %s, timing %s (%s)",
+                    kbps, result.sent, result.expected,
                     result.received, result.lossPercent, result.worstWindowLossPercent,
                     result.delayP99Ms, result.delayGrowthMs, result.senderMs, result.receiverReadDelayP99Ms,
-                    result.kernelArrivalTimestamps, result.capacityQualified() ? "pass" : "fail",
+                    result.kernelArrivalTimestamps, result.hostSendRetries, result.hostLastSendError,
+                    result.capacityQualified() ? "pass" : "fail",
                     result.stable() ? "pass" : "fail", result.failureReason());
                 return result;
             }, [&] { return cancelled->load(); }, false);
@@ -1042,6 +1071,78 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
                     .arg(link.received).arg(link.expected).arg(link.lossPercent, 0, 'f', 3)
                     .arg(link.delayP99Ms, 0, 'f', 2).arg(link.delayGrowthMs, 0, 'f', 2)
                     .arg(link.senderMs, 0, 'f', 2).toStdString());
+            }
+            // The capacity probe spreads load evenly, but the stream sends each
+            // frame back-to-back. Send the measured budget as frames at this
+            // frame rate and find the fastest pace within the loss limit.
+            int paceLinkMbps = 0;
+            for (int known : {hostLinkMbps, linkMbps}) {
+                if (known > 0) paceLinkMbps = paceLinkMbps ? (std::min)(paceLinkMbps, known) : known;
+            }
+            paceLinkMbps = (std::min)(paceLinkMbps, 9999);
+            linkSpeedKbps = paceLinkMbps * 1000;
+            if (cancelled->load()) {
+                throw std::runtime_error("Calibration stopped.");
+            }
+            if (NvHTTP::getXmlString(serverInfo, "PyroWaveUdpProbeBurstVersion") != "1") {
+                paceNote = tr("Update Vibeshine to calibrate frame pacing; the host will use its default.");
+            }
+            else if (paceLinkMbps <= 0) {
+                paceNote = tr("Frame pacing was not calibrated because neither wired link speed is known.");
+            }
+            else {
+                // Probe frames as large as the selected video settings stream
+                // at this target. A Moderate/Maximum budget can far exceed
+                // them, and its 125% pace floor would then approach the link.
+                int budgetKbps = link.requestedKbps;
+                if (recommendedImageKbps > 0) {
+                    const auto selected = static_cast<PyroWaveCalibration::Target>(target);
+                    const int wireCap = PyroWaveCalibration::wireTarget(selected, link.requestedKbps, linkSpeedKbps,
+                        PyroWaveCalibration::roundUp(pyrowave::bandwidth::total_kbps(recommendedImageKbps, fps, transport)));
+                    const int image = PyroWaveCalibration::imageTarget(selected, recommendedImageKbps,
+                        PyroWaveCalibration::imageCapacity(wireCap, fps, transport));
+                    const int wire = PyroWaveCalibration::roundUp(pyrowave::bandwidth::total_kbps(image, fps, transport));
+                    if (wire >= PyroWaveLink::minimumKbps) budgetKbps = (std::min)(budgetKbps, wire);
+                }
+                const int burstFps = std::clamp(fps, 10, 500);
+                try {
+                    pace = PyroWaveLink::searchPace(paceLinkMbps * 1000, budgetKbps / 4 * 5, [&](int paceKbps) {
+                        QMetaObject::invokeMethod(this, [this, paceKbps, budgetKbps] {
+                            m_Message = tr("Testing frame pacing at %1 Mbps: sending %2 Mbps as whole frames and measuring packet loss…")
+                                .arg(paceKbps / 1000).arg(budgetKbps / 1000);
+                            emit changed();
+                        }, Qt::QueuedConnection);
+                        const auto result = http.probePyroWaveUdp(budgetKbps, packetSize, *cancelled, udpHandshake,
+                                                                  burstFps, (std::max)(paceKbps, budgetKbps));
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "PyroWave pace probe: %d kbps as %d FPS frames paced at %d kbps: sent %u/%u, received %u, "
+                            "loss %.3f%%, worst 100ms %.3f%%, host duration %.2f ms, host send retries %u, "
+                            "host send error %d: %s", budgetKbps, burstFps, paceKbps,
+                            result.sent, result.expected, result.received, result.lossPercent,
+                            result.worstWindowLossPercent, result.senderMs,
+                            result.hostSendRetries, result.hostLastSendError,
+                            PyroWaveLink::paceQualified(result) ? "within loss limit" : "over loss limit");
+                        return result;
+                    }, [&] { return cancelled->load(); });
+                }
+                catch (const std::exception& e) {
+                    if (cancelled->load()) throw;
+                    pace = {};
+                    paceNote = tr("Frame pacing could not be calibrated (%1); the host will use its default.")
+                        .arg(QString::fromUtf8(e.what()));
+                }
+                if (!cancelled->load() && pace.paceKbps) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "PyroWave frame pace: %d kbps (%s, loss %.3f%%), link %d Mbps",
+                                pace.paceKbps, pace.lossless ? "within loss limit" : "least loss",
+                                pace.probe.lossPercent, paceLinkMbps);
+                    paceNote = pace.lossless ?
+                        tr("Frame pacing: %1 Mbps keeps packet loss under %2% on this %3 Mbps path (measured %4%).")
+                            .arg(pace.paceKbps / 1000).arg(PyroWaveLink::paceLossPercent, 0, 'f', 0)
+                            .arg(paceLinkMbps).arg(pace.probe.lossPercent, 0, 'f', 2) :
+                        tr("Frame pacing: no pace kept packet loss under %1%; %2 Mbps lost least (%3%).")
+                            .arg(PyroWaveLink::paceLossPercent, 0, 'f', 0)
+                            .arg(pace.paceKbps / 1000).arg(pace.probe.lossPercent, 0, 'f', 2);
+                }
             }
         }
         catch (const std::exception& e) {
@@ -1061,15 +1162,18 @@ void PyroWaveCalibrator::start(ComputerManager* manager, const QString& hostUuid
             }, Qt::QueuedConnection);
             return;
         }
-        QMetaObject::invokeMethod(this, [this, hostName, link, transport, cancelled] {
+        QMetaObject::invokeMethod(this, [this, hostName, link, pace, paceNote, linkSpeedKbps, transport, cancelled] {
             if (cancelled->load()) return;
             m_LinkCapKbps = link.requestedKbps;
+            m_LinkSpeedKbps = linkSpeedKbps;
+            m_PaceMbps = pace.paceKbps / 1000;
             m_Transport = transport;
             m_BandwidthReady = true;
             m_LinkSummary = tr("%1 → this PC: measured throughput budget %2 Mbps including FEC and headers, with 5% headroom where available. Packet loss %3%; worst 100 ms %4%; delivery variation p99 %5 ms. Critical FEC: %6%. Rates below include overhead; quality uses the remaining image bitrate.")
                 .arg(hostName).arg(link.requestedKbps / 1000).arg(link.lossPercent, 0, 'f', 2)
                 .arg(link.worstWindowLossPercent, 0, 'f', 2).arg(link.delayP99Ms, 0, 'f', 1)
                 .arg(transport.critical_fec_percentage);
+            if (!paceNote.isEmpty()) m_LinkSummary += QStringLiteral(" ") + paceNote;
             const auto grade = bandwidthQuality();
             if (grade == QStringLiteral("target")) {
                 m_Message = tr("Selected quality target met for %1. Choose Next to test the decoder.").arg(m_VideoDescription);
@@ -1093,6 +1197,8 @@ void PyroWaveCalibrator::reset()
     cancel();
     m_BandwidthReady = false;
     m_LinkCapKbps = 0;
+    m_LinkSpeedKbps = 0;
+    m_PaceMbps = 0;
     m_Results.clear();
     m_Message.clear();
     m_LinkSummary.clear();
@@ -1136,12 +1242,13 @@ void PyroWaveCalibrator::startDecoderTest(const QString& hostUuid, int bitrateTa
     m_Message = tr("Stress testing decoder and rendering at %1 FPS…").arg(m_Fps);
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
     m_Cancel = cancelled;
-    const int fps = m_Fps, width = m_DisplayWidth, height = m_DisplayHeight, cap = m_LinkCapKbps;
+    const int fps = m_Fps, width = m_DisplayWidth, height = m_DisplayHeight, cap = m_LinkCapKbps,
+              linkSpeed = m_LinkSpeedKbps;
     const auto target = static_cast<PyroWaveCalibration::Target>(m_Target);
     const auto transport = m_Transport;
     emit changed();
-    m_Worker = QThread::create([this, fps, width, height, cap, target, transport, cancelled] {
-        const QString error = runSweep(fps, width, height, cap, target, transport, *cancelled,
+    m_Worker = QThread::create([this, fps, width, height, cap, linkSpeed, target, transport, cancelled] {
+        const QString error = runSweep(fps, width, height, cap, linkSpeed, target, transport, *cancelled,
                                       [this, cancelled](const Sample& sample) {
             const QVariantMap result = toMap(sample);
             QMetaObject::invokeMethod(this, [this, result, cancelled] {

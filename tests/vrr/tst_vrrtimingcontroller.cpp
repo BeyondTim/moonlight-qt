@@ -4369,6 +4369,56 @@ void testReadinessHitchBufferAdaptation()
     expect(finalDelay < peak, "expired event demands must release increased buffering");
 }
 
+// A PyroWave frame delivered with zero-filled detail can still be late (its
+// lost tail waits out a pacing gap), but lost detail is neither delivery jitter
+// nor slow work. Presenting such frames late must not teach any adaptive
+// buffer to add standing latency. The same faults without loss still do.
+void testLostPacketFramesDoNotGrowBuffer()
+{
+    struct Variant { const char* name; bool readinessHitch; bool legacyPredictor; bool controlGrows; };
+    const Variant variants[] = {
+        {"production", false, false, false},
+        {"prediction-only", false, true, true},
+        {"readiness-hitch", true, false, true},
+    };
+    for (const auto& variant : variants) {
+        auto session = config(60, 120);
+        session.readinessHitchFeedback = variant.readinessHitch;
+        auto policy = vrrTimingParametersForSession(session);
+        if (variant.legacyPredictor) {
+            policy.playoutResponsiveBuffer = 0;
+            policy.playoutDelayMarginUs = 3000;
+        }
+        uint64_t clean[2] = {}, peak[2] = {};
+        for (int lossy = 0; lossy < 2; ++lossy) {
+            VrrTimingController controller(session, true, policy);
+            uint64_t last = 0;
+            for (int i = 0; i < 3000; ++i) {
+                const auto source = decodedTimeForRtp(1000000, uint32_t(i * 1500));
+                const bool fault = i >= 600 && i < 1200 && i % 10 == 9;
+                const auto decoded = source + (fault ? 9000 : 0);
+                const auto now = std::max(decoded, last);
+                auto paced = frame(i, uint32_t(i * 1500), true, decoded);
+                if (lossy && fault) paced.setLostPackets(12);
+                const auto d = controller.schedule(paced, now);
+                controller.notePreparationDuration(1000);
+                last = std::max(d.targetUs, std::max(now, d.renderStartUs) + 1000);
+                controller.noteSubmission(true, false, last);
+                if (i == 599) clean[lossy] = d.playoutDelayUs;
+                if (i >= 600) peak[lossy] = std::max(peak[lossy], d.playoutDelayUs);
+            }
+        }
+        std::printf("lost-packet buffer (%s): clean %llu peak %llu; with loss clean %llu peak %llu\n",
+                    variant.name, (unsigned long long)clean[0], (unsigned long long)peak[0],
+                    (unsigned long long)clean[1], (unsigned long long)peak[1]);
+        if (variant.controlGrows) {
+            expect(peak[0] > clean[0], "late frames without loss must still earn buffering");
+        }
+        expect(peak[1] <= clean[1], "late frames with lost packets must not grow the playout buffer");
+        expect(peak[1] <= peak[0], "loss must never earn more buffering than the same lateness without it");
+    }
+}
+
 void testPredictionOnlyBufferAdaptation()
 {
     const auto session = config(60, 120);
@@ -6904,6 +6954,7 @@ int main()
     testSubmissionEstimateFallback();
     testReadinessHitchAttribution();
     testReadinessHitchBufferAdaptation();
+    testLostPacketFramesDoNotGrowBuffer();
     testPredictionOnlyBufferAdaptation();
     testNativeHitchGatesPadding();
     testDelayedDisplayEventsAgreeAcrossBackends();

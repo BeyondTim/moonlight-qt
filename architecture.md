@@ -183,6 +183,21 @@ sequence wrap, misleading EOF flags, successor recovery and interior reordering.
 These tests establish receive-path correctness; a new live capture is still
 needed to measure visual improvement and actual loss after this change.
 
+PyroWave loss costs detail, not timing (2026-10-06). A USB 2.5GbE dock drops
+whole 12-16 packet USB transfers, frequently including a frame's final packets;
+waiting for the successor delivered those frames 5+ ms late and the pacer then
+grew its buffer for them. With the final packet absent, the queue now arms
+`PYROWAVE_TAIL_SILENCE_US` (3 ms) or the VRR slot, never sooner than
+`PYROWAVE_LATE_TAIL_SILENCE_US` (1.2 ms) after the last unique packet; both
+exceed the 800 us and 2.5 ms host gaps above, whose regression still passes.
+Critical-prefix and parity rules are unchanged. `FFmpegVideoDecoder` carries
+each frame's `BUFFER_TYPE_LOST` count to `PacedFrame::lostPackets()`, and
+`VrrTimingController::schedule()` clears that frame's smoothness and prediction
+eligibility: it is presented as scheduled, but its lateness never grows the
+readiness, interval, mean-miss or smoothness buffers. A 237 s 740 Mbps capture
+before this change had 267 partial frames and 11.8% of presented intervals
+jerking over 2 ms.
+
 On Windows, `initializePyroWave()` creates `D3D11VARenderer` and a PyroWave
 Vulkan device matched by adapter LUID. Decode submits into one of ten D3D11-owned
 three-plane R8/R16 surfaces. The software-planar-format `AVFrame` holds a
@@ -444,8 +459,11 @@ connection can still continue to the per-format decoder tests, where an Any
 display result is yellow/red when its image rate misses these quality bounds.
 Four target cards default to Recommended: Minimum requests half the author's
 recommended image bitrate (rounded down to the 5 Mbps step, with a 5 Mbps
-minimum), Recommended requests the author's full image guide, Moderate uses at
-most 60% of freshly confirmed usable wire bandwidth, and Maximum uses the full
+minimum), Recommended requests the author's full image guide, Moderate aims for
+60% of the slower known link speed, never below the format's Recommended wire
+rate and stepped down to the freshly confirmed budget when the path cannot carry
+it (`PyroWaveCalibration::wireTarget`; 60% of a confirmed 1135 Mbps on a
+2.5 Gbps link had fallen below Recommended), and Maximum uses the full
 confirmed budget. All four respect network, packet/FEC overhead, frame capacity
 and device limits.
 
@@ -474,13 +492,17 @@ staged calibration fixture; that does not establish physical controller or
 live-host calibration behavior.
 
 The network search starts with a 2-second paced UDP probe at its bounded
-ceiling. For Moderate and Maximum that ceiling is the smaller known endpoint
-link speed, capped at 3 Gbps; for Minimum and Recommended it is also limited to
+ceiling. For Maximum that ceiling is the smaller known endpoint link speed,
+capped at 3 Gbps; Moderate stops at 60% of it or the matrix's largest
+Recommended rate, whichever is higher, plus the confirmation margin; for Minimum and Recommended it is also limited to
 the largest target in the format matrix, with room for applied bitrate rounding
 and the final 5% margin. A failed ceiling is bisected to 5 Mbps precision. A
-capacity candidate must have <=0.1% overall loss, <=1% loss in every 100 ms window,
-<=2 ms growth, finite timing measurements, and complete/on-time host
-sending. The chosen rate leaves 5% margin where possible and passes two fresh
+capacity candidate must have under 2% overall loss and under 5% in every 100 ms
+window (PyroWave loss is blur; unsent packets count as lost), at least 98% of
+packets sent on time by the host, <=2 ms growth and finite timing measurements.
+A 0.1%/all-sent rule collapsed a 2026-10-06 run to 480 Mbps after the host
+transiently failed to send 384 of 204,783 packets. Vibeshine now retries a full
+send buffer for 1 ms and reports `sendRetries`/`lastSendError` per probe. The chosen rate leaves 5% margin where possible and passes two fresh
 confirmations; failed confirmation backs off another 20%. Sequence accounting
 includes lost tails without counting duplicates. The <=4 ms p99 relative transit
 variation gate remains the separate strict stability grade, but no longer
@@ -557,9 +579,14 @@ image Mbps. Reduced/low quality stays visible even on slow-format rows.
 At stream launch the client's known routed wired speed is sent in
 `x-ss-video[0].pyrowaveLinkMbps`; the host uses the smaller known endpoint speed
 for packet pacing. Its physical wire cap no longer applies a second 20%
-reduction after calibration. The UDP probe uses 1 ms groups, not a live encoded
-frame stream: host encoding, actual frame bursts, sustained gameplay and
-physical scanout remain unverified. No calibration cache is introduced. See
+reduction after calibration. The capacity probe uses evenly spread 1 ms groups.
+Against hosts with `PyroWaveUdpProbeBurstVersion=1`, calibration then sends the
+selected settings' bitrate (capped by the budget) as frames on the stream pacer's schedule and keeps the fastest
+pace losing under 2% (`PyroWaveLink::searchPace`); applying a format stores it as
+`StreamingPreferences::pyroWavePaceMbps`, announced at launch in
+`x-ss-video[0].pyrowavePaceMbps`. Uncalibrated, the host paces at 80% of the
+link, because a USB 2.5GbE dock dropped whole frame tails above ~2.2 Gbps.
+Host encoding, sustained gameplay and physical scanout remain unverified. See
 [protocol details](docs/pyrowave-protocol.md#fec-inclusive-recommendations-and-udp-calibration).
 
 The color is smoothness risk, with margin for a live stream costing about a

@@ -1960,6 +1960,10 @@ bool Session::startConnectionAsync()
     if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) {
         m_StreamConfig.pyrowaveLinkMbps = NetworkBuffers::routedWiredLinkMbps(
             QHostAddress(m_Computer->activeAddress.address()));
+        // Calibration's loss-free frame pace. Hosts without support ignore it.
+        m_StreamConfig.pyrowavePaceMbps = (std::max)(0, m_Preferences->pyroWavePaceMbps);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "PyroWave pacing hints: link %d Mbps, calibrated pace %d Mbps",
+                    m_StreamConfig.pyrowaveLinkMbps, m_StreamConfig.pyrowavePaceMbps);
     }
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,

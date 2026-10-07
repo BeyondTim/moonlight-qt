@@ -349,6 +349,7 @@ void FFmpegVideoDecoder::reset()
     m_FrameInfoQueue.clear();
     m_FrameSubmitTimeQueue.clear();
     m_FrameDecodeHoldQueue.clear();
+    m_FrameLostPacketsQueue.clear();
 
     while (!m_PyroWaveOutput.isEmpty()) {
         AVFrame* frame = m_PyroWaveOutput.dequeue();
@@ -2831,6 +2832,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // decoding or decoder backlog; keep it out of both stats.
                     const uint64_t decodeHoldUs = m_FrameDecodeHoldQueue.isEmpty() ?
                         0 : m_FrameDecodeHoldQueue.head();
+                    const uint32_t frameLostPackets = m_FrameLostPacketsQueue.isEmpty() ?
+                        0 : m_FrameLostPacketsQueue.head();
                     if (!m_FrameInfoQueue.isEmpty()) {
                         // Data buffers in the DU are not valid here!
                         DECODE_UNIT du = m_FrameInfoQueue.dequeue();
@@ -2855,6 +2858,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (!m_FrameDecodeHoldQueue.isEmpty()) {
                         m_FrameDecodeHoldQueue.dequeue();
                     }
+                    if (!m_FrameLostPacketsQueue.isEmpty()) {
+                        m_FrameLostPacketsQueue.dequeue();
+                    }
 
                     m_ActiveWndVideoStats.decodedFrames++;
 
@@ -2869,6 +2875,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                                                        reassembledUs,
                                                        decodeSubmitUs);
                         pacedFrame.setDecodeHoldUs(decodeHoldUs);
+                        pacedFrame.setLostPackets(frameLostPackets);
 #ifdef HAVE_PYROWAVE
                         // Shared-surface output (Vulkan, D3D11 or Metal interop)
                         // returns at submission, not completion.
@@ -2967,16 +2974,16 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     // Observe every delivered PyroWave frame before stale-frame shedding or
     // decoding. Missing detail can shimmer without dropping a whole frame.
-    if (!m_TestOnly) {
-        uint64_t totalPackets = 0, lostPackets = 0;
-        if (m_PyroWaveActive) {
-            // PyroWave depacketization preserves one entry per data packet,
-            // including placeholders for holes that FEC could not recover.
-            for (PLENTRY packet = du->bufferList; packet != nullptr; packet = packet->next) {
-                ++totalPackets;
-                lostPackets += packet->bufferType == BUFFER_TYPE_LOST;
-            }
+    uint64_t totalPackets = 0, lostPackets = 0;
+    if (m_PyroWaveActive) {
+        // PyroWave depacketization preserves one entry per data packet,
+        // including placeholders for holes that FEC could not recover.
+        for (PLENTRY packet = du->bufferList; packet != nullptr; packet = packet->next) {
+            ++totalPackets;
+            lostPackets += packet->bufferType == BUFFER_TYPE_LOST;
         }
+    }
+    if (!m_TestOnly) {
         const bool visible = m_PyroWavePacketLossWarning.observe(LiGetMicroseconds(),
             m_PyroWaveActive && Session::get()->clientPacingWarningsEnabled(), totalPackets, lostPackets);
         Session::get()->getOverlayManager().setStatusMessage(Overlay::StatusSource::PacketLoss,
@@ -3138,6 +3145,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
             m_FrameInfoQueue.enqueue(*du);
             m_FrameSubmitTimeQueue.enqueue(decodeSubmitUs);
             m_FrameDecodeHoldQueue.enqueue(decodeHoldUs);
+            m_FrameLostPacketsQueue.enqueue(uint32_t((std::min)(lostPackets, uint64_t(UINT32_MAX))));
             m_FramesIn++;
         }
         return DR_OK;
@@ -3176,6 +3184,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     m_FrameInfoQueue.enqueue(*du);
     m_FrameSubmitTimeQueue.enqueue(decodeSubmitUs);
     m_FrameDecodeHoldQueue.enqueue(0);
+    m_FrameLostPacketsQueue.enqueue(0);
 
     m_FramesIn++;
     return DR_OK;

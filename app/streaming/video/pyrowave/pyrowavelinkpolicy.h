@@ -12,6 +12,16 @@ constexpr int durationMs = 2000;
 constexpr int windowMs = 100;
 constexpr int windowCount = durationMs / windowMs;
 
+// PyroWave turns lost detail into blur: the receiver releases frames on time
+// without it and the pacer does not buffer for it, so under 2% loss is usable
+// (one bad 100 ms window above 5% is bunched, visible loss). Packets the host
+// could not send count as lost; below 98% sent, the host itself is overloaded.
+// A 0.1% limit failed a whole 1.25 Gbps step for 384 unsent packets and
+// collapsed calibration to 480 Mbps.
+constexpr double lossLimitPercent = 2.0;
+constexpr double windowLossLimitPercent = 5.0;
+constexpr double minimumSentShare = 0.98;
+
 struct Result {
     int requestedKbps = 0;
     uint32_t expected = 0;
@@ -24,18 +34,26 @@ struct Result {
     double delayGrowthMs = 0;
     bool kernelArrivalTimestamps = false;
     double receiverReadDelayP99Ms = 0;
+    // Host diagnostics (Vibeshine): packets retried after a full send buffer
+    // and the last send error. Older hosts report neither.
+    uint32_t hostSendRetries = 0;
+    int hostLastSendError = 0;
+
+    bool hostSentEnough() const {
+        return expected > 0 && sent <= expected && sent >= expected * minimumSentShare;
+    }
 
     const char* failureReason() const {
         if (!expected) return "no probe completed";
-        if (sent != expected) return "host did not send every probe packet";
+        if (!hostSentEnough()) return "host did not send enough probe packets";
         if (!received) return "no UDP packets received";
         if (received > sent) return "invalid received packet count";
         if (!std::isfinite(senderMs) || !std::isfinite(lossPercent) ||
             !std::isfinite(worstWindowLossPercent) || !std::isfinite(delayP99Ms) ||
             !std::isfinite(delayGrowthMs)) return "invalid timing measurement";
         if (senderMs < durationMs * 0.98 || senderMs > durationMs * 1.02) return "host probe missed its sending duration";
-        if (lossPercent > 0.1) return "packet loss exceeds the limit";
-        if (worstWindowLossPercent > 1.0) return "bursty packet loss exceeds the limit";
+        if (lossPercent >= lossLimitPercent) return "packet loss exceeds the limit";
+        if (worstWindowLossPercent >= windowLossLimitPercent) return "bursty packet loss exceeds the limit";
         if (delayP99Ms > 4.0) return "packet delivery variation exceeds 4 ms";
         if (delayGrowthMs > 2.0) return "packet delivery delay grows by more than 2 ms";
         return "stable";
@@ -45,10 +63,10 @@ struct Result {
     // limits. Transit jitter is a separate smoothness warning, not proof that
     // the codec/device is unsupported or that lowering bitrate will help.
     bool capacityQualified() const {
-        return expected > 0 && sent == expected && received > 0 && received <= sent &&
+        return hostSentEnough() && received > 0 && received <= sent &&
                std::isfinite(delayP99Ms) && std::isfinite(delayGrowthMs) &&
                senderMs >= durationMs * 0.98 && senderMs <= durationMs * 1.02 &&
-               lossPercent <= 0.1 && worstWindowLossPercent <= 1.0 &&
+               lossPercent < lossLimitPercent && worstWindowLossPercent < windowLossLimitPercent &&
                delayGrowthMs <= 2.0;
     }
 
@@ -139,5 +157,90 @@ Result search(int targetKbps, int capKbps, Probe probe, Cancelled cancelled,
         next = (std::max)(minimumKbps, rounded(next * 0.8));
     }
     return cancelled() ? Result{} : best;
+}
+
+// Frame pacing. The capacity probe spreads each millisecond's share evenly, so
+// it never shows whether the receive path can absorb a whole frame arriving
+// back-to-back. Frame-shaped probes (NvHTTP::probePyroWaveUdp burstFps) send
+// the same packets as video frames on the stream pacer's 1 ms groups. A USB
+// 2.5GbE dock lost whole 12-16 packet USB transfers above ~2.2 Gbps although
+// its link reported 2.5 Gbps; the host then paces at the pace found here.
+constexpr int paceStepKbps = 50000;
+// The same loss limits as capacity: below 2% a faster pace (sooner whole
+// frames) is worth more than the missing detail.
+constexpr double paceLossPercent = lossLimitPercent;
+constexpr double paceWindowLossPercent = windowLossLimitPercent;
+
+// Only loss and the host's sending duration grade a frame-shaped probe: its
+// delivery timing is intentionally bursty, not the capacity probe's schedule.
+inline bool paceQualified(const Result& result)
+{
+    return result.hostSentEnough() && result.received > 0 && result.received <= result.sent &&
+           std::isfinite(result.senderMs) && std::isfinite(result.lossPercent) &&
+           result.senderMs >= durationMs * 0.98 && result.senderMs <= durationMs * 1.02 &&
+           result.lossPercent < paceLossPercent && result.worstWindowLossPercent < paceWindowLossPercent;
+}
+
+struct PaceResult {
+    int paceKbps = 0;      // Zero: not determined; the host keeps its default.
+    bool lossless = false; // True: within the loss limit. False: none was; paceKbps lost least.
+    Result probe;          // Measurement behind paceKbps.
+};
+
+// Highest pace, between floorKbps (a frame must still fit the frame interval)
+// and the link, within the loss limit; if none is, the pace that lost least
+// (the faster on ties). The link is tried first. Below it, a bisected pass
+// leaves a 5% margin that must pass twice afresh, stepping down on failure.
+template<class Probe, class Cancelled>
+PaceResult searchPace(int linkKbps, int floorKbps, Probe probe, Cancelled cancelled)
+{
+    const auto stepDown = [](double kbps) { return int(kbps / paceStepKbps) * paceStepKbps; };
+    const int cap = stepDown(linkKbps);
+    if (cap < paceStepKbps) return {};
+    const int floor = std::clamp(int(std::ceil(double(floorKbps) / paceStepKbps)) * paceStepKbps,
+                                 paceStepKbps, cap);
+    PaceResult fewest;
+    const auto passes = [&](int pace) {
+        const Result result = probe(pace);
+        if (!fewest.paceKbps || result.lossPercent < fewest.probe.lossPercent ||
+            (result.lossPercent == fewest.probe.lossPercent && pace > fewest.paceKbps)) {
+            fewest = {pace, false, result};
+        }
+        return paceQualified(result);
+    };
+    const auto confirmed = [&](int pace) -> PaceResult {
+        Result last;
+        for (int run = 0; run < 2; ++run) {
+            if (cancelled()) return {};
+            last = probe(pace);
+            if (!paceQualified(last)) return {};
+        }
+        return {pace, true, last};
+    };
+    if (passes(cap)) {
+        if (cancelled()) return {};
+        const auto atLink = confirmed(cap);
+        if (atLink.lossless || cancelled()) return cancelled() ? PaceResult{} : atLink;
+    }
+    if (cancelled()) return {};
+    int low = 0, high = cap;
+    if (floor < cap) {
+        if (!passes(floor)) return cancelled() ? PaceResult{} : fewest;
+        low = floor;
+        for (int attempt = 0; attempt < 16 && high - low > paceStepKbps && !cancelled(); ++attempt) {
+            const int next = (std::max)(low + paceStepKbps, stepDown((low + high) / 2.0));
+            if (next >= high) break;
+            if (passes(next)) low = next;
+            else high = next;
+        }
+    }
+    if (cancelled() || !low) return cancelled() ? PaceResult{} : fewest;
+    for (int pace = (std::max)(floor, stepDown(low * 0.95)); !cancelled();
+         pace = (std::max)(floor, stepDown(pace * 0.9))) {
+        const auto result = confirmed(pace);
+        if (result.lossless) return result;
+        if (pace == floor) break;
+    }
+    return cancelled() ? PaceResult{} : fewest;
 }
 } // namespace PyroWaveLink

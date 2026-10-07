@@ -57,6 +57,7 @@
 #define SER_GAMEPADMOUSE "gamepadmouse"
 #define SER_DEFAULTVER "defaultver"
 #define SER_PACKETSIZE "packetsize"
+#define SER_PYROWAVEPACE "pyrowavepacembps"
 #define SER_DETECTNETBLOCKING "detectnetblocking"
 #define SER_SHOWPERFOVERLAY "showperfoverlay"
 #define SER_SHOWFRAMETIMEGRAPH "showframetimegraph"
@@ -189,6 +190,7 @@ void StreamingPreferences::reload()
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
     showFrametimeGraph = settings.value(SER_SHOWFRAMETIMEGRAPH, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
+    pyroWavePaceMbps = settings.value(SER_PYROWAVEPACE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
     backgroundGamepad = settings.value(SER_BACKGROUNDGAMEPAD, false).toBool();
@@ -404,6 +406,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_RICHPRESENCE, richPresence);
     settings.setValue(SER_GAMEPADMOUSE, gamepadMouse);
     settings.setValue(SER_PACKETSIZE, packetSize);
+    settings.setValue(SER_PYROWAVEPACE, pyroWavePaceMbps);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
     settings.setValue(SER_SHOWPERFOVERLAY, showPerformanceOverlay);
     settings.setValue(SER_SHOWFRAMETIMEGRAPH, showFrametimeGraph);

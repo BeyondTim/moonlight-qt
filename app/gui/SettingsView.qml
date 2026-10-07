@@ -920,8 +920,8 @@ Flickable {
                           description: qsTr("Half the developer's recommended image bitrate. Uses less bandwidth.") },
                         { text: qsTr("Recommended"), summary: qsTr("Developer choice"), value: PyroWaveCalibrator.Recommended,
                           description: qsTr("The developer's recommended image bitrate for each format.") },
-                        { text: qsTr("Moderate"), summary: qsTr("60% of measured link"), value: PyroWaveCalibrator.Moderate,
-                          description: qsTr("Use up to 60% of the measured bandwidth, including overhead.") },
+                        { text: qsTr("Moderate"), summary: qsTr("60% of link speed"), value: PyroWaveCalibrator.Moderate,
+                          description: qsTr("Aim for 60% of the link speed including overhead, never below Recommended. Calibration lowers it to what the connection sustains.") },
                         { text: qsTr("Maximum"), summary: qsTr("Full measured budget"), value: PyroWaveCalibrator.Maximum,
                           description: qsTr("Find the highest tested bitrate the connection and this device can sustain, with network headroom.") }
                     ]
@@ -1116,6 +1116,8 @@ Flickable {
                         StreamingPreferences.enableYUV444 = option.chroma444
                         StreamingPreferences.enableHdr = option.hdr
                         StreamingPreferences.bitrateKbps = option.bitrateKbps
+                        // The tested frame pace; 0 lets the host use its default.
+                        StreamingPreferences.pyroWavePaceMbps = PyroWaveCalibrator.paceMbps
                         StreamingPreferences.autoAdjustBitrate = false
                         slider.value = StreamingPreferences.bitrateKbps
 

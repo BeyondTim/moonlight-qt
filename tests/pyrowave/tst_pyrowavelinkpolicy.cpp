@@ -99,10 +99,19 @@ int main() {
     }
     summarize(clean, times);
     CHECK(clean.stable() && clean.delayP99Ms < 0.001);
-    // A short burst is unacceptable even when aggregate loss is under 0.1%.
+    // PyroWave tolerates a short burst (8 packets, 1.6% of one window)...
     for (int i = 0; i < 8; ++i) times[i] = -1;
     summarize(clean, times);
-    CHECK(clean.lossPercent < 0.1 && !clean.stable());
+    CHECK(clean.lossPercent < 0.1 && clean.worstWindowLossPercent > 1 && clean.stable());
+    // ...but not loss bunched into one window above 5%, even under 2% overall.
+    for (int i = 0; i < 30; ++i) times[i] = -1;
+    summarize(clean, times);
+    CHECK(clean.lossPercent < 2 && clean.worstWindowLossPercent > 5 && !clean.stable());
+    CHECK(std::string(clean.failureReason()) == "bursty packet loss exceeds the limit");
+    for (int i = 0; i < 30; ++i) {
+        const auto tick = (uint64_t(i+1) * durationMs + clean.expected - 1) / clean.expected - 1;
+        times[i] = 123456789 + tick * 1000;
+    }
     // Tail loss is counted against the sender's expected count.
     times.assign(clean.expected, -1);
     summarize(clean, times);
@@ -111,9 +120,25 @@ int main() {
     for (uint32_t seq = 0; seq < clean.expected; ++seq) times[seq] = 100000 + int64_t(seq) * 202;
     summarize(clean, times);
     CHECK(!clean.stable() && clean.delayGrowthMs > 2);
+    // A host that misses a few sends (a stalled send buffer) is measured as loss,
+    // not a failed step; one that cannot send 98% is overloaded.
     clean = sample(500000, true);
-    --clean.sent;
-    CHECK(!clean.stable());
+    clean.sent = clean.received = 9950;
+    clean.lossPercent = 0.5;
+    CHECK(clean.capacityQualified() && paceQualified(clean));
+    clean.sent = clean.received = 9700;
+    clean.lossPercent = 3;
+    CHECK(!clean.capacityQualified() && !paceQualified(clean));
+    CHECK(std::string(clean.failureReason()) == "host did not send enough probe packets");
+    // Loss under 2% qualifies capacity; 2% does not.
+    clean = sample(500000, true);
+    clean.lossPercent = clean.worstWindowLossPercent = 1.9;
+    clean.received = 9810;
+    CHECK(clean.capacityQualified());
+    clean.lossPercent = clean.worstWindowLossPercent = 2.0;
+    clean.received = 9800;
+    CHECK(!clean.capacityQualified());
+    CHECK(std::string(clean.failureReason()) == "packet loss exceeds the limit");
     clean = sample(500000, true);
     clean.senderMs = 2300;
     CHECK(!clean.stable());
@@ -138,6 +163,21 @@ int main() {
     CHECK(C::imageTarget(C::Minimum, 5000, 2000000) == 5000);
     CHECK(C::wireTarget(C::Moderate, 950000) == 570000);
     CHECK(C::wireTarget(C::Maximum, 950000) == 950000);
+    // Moderate aims for 60% of the link, never below Recommended, and steps
+    // down to what calibration confirmed. On the 2.5 Gbps dock path a 1135 Mbps
+    // budget gave 680 Mbps (below Recommended's ~850) when 60% applied to it.
+    CHECK(C::wireTarget(C::Moderate, 1135000, 2500000, 850000) == 1135000);
+    CHECK(C::wireTarget(C::Moderate, 3000000, 2500000, 850000) == 1500000);
+    CHECK(C::wireTarget(C::Moderate, 3000000, 1000000, 850000) == 850000);
+    CHECK(C::wireTarget(C::Moderate, 700000, 2500000, 850000) == 700000);
+    CHECK(C::wireTarget(C::Maximum, 1135000, 2500000, 850000) == 1135000);
+    for (int budget : {200000, 700000, 1135000, 2000000, 3000000})
+        for (int link : {0, 1000000, 2500000, 10000000}) for (int recommended : {300000, 850000}) {
+            const int moderate = C::wireTarget(C::Moderate, budget, link, recommended);
+            CHECK(moderate <= budget);
+            CHECK(moderate >= (std::min)(budget, recommended));
+            CHECK(moderate <= C::wireTarget(C::Maximum, budget, link, recommended));
+        }
     CHECK(C::imageQuality(C::Recommended, 500000, 765000) == C::ReducedQuality);
     CHECK(C::imageQuality(C::Recommended, 765000, 765000) == C::MeetsTarget);
     CHECK(C::imageQuality(C::Recommended, 900000, 765000) == C::MeetsTarget);
@@ -219,5 +259,62 @@ int main() {
         [](int) { return Cost {true, 9, 10, true}; },
         [](int) { std::abort(); return Cost {}; }, keepsUp, [] { return true; });
     CHECK(!keepsUp(cancelled.cost));
+    // Frame pacing: highest loss-free pace, else the pace that lost least.
+    const auto lossy = [](int kbps, double loss) {
+        auto measured = sample(kbps, true);
+        measured.lossPercent = measured.worstWindowLossPercent = loss;
+        measured.received = uint32_t(measured.expected * (1 - loss / 100));
+        measured.delayP99Ms = 30; // Bursty delivery never grades a pace probe.
+        return measured;
+    };
+    std::vector<int> paces;
+    const auto paceRun = [&](int link, int floor, auto lossAt) {
+        paces.clear();
+        return searchPace(link, floor, [&](int pace) { paces.push_back(pace); return lossy(pace, lossAt(pace)); },
+                          [] { return false; });
+    };
+    // A receiver that keeps up at line rate is paced at the link after two confirmations.
+    auto pace = paceRun(2500000, 1200000, [](int) { return 0.0; });
+    CHECK(pace.lossless && pace.paceKbps == 2500000 && paces == std::vector<int>({2500000, 2500000, 2500000}));
+    // The measured dock: whole USB transfers drop above 2.2 Gbps. The bisected
+    // edge keeps a 5% margin, confirmed twice, and never probes below the floor.
+    pace = paceRun(2500000, 1200000, [](int p) { return p <= 2200000 ? 0.0 : 2.0; });
+    CHECK(pace.lossless && pace.paceKbps == 2050000);
+    CHECK(paces[paces.size() - 1] == 2050000 && paces[paces.size() - 2] == 2050000);
+    CHECK(*std::min_element(paces.begin(), paces.end()) >= 1200000 && paces.size() <= 12);
+    // PyroWave tolerates loss as detail: under 2% qualifies, even at the link.
+    pace = paceRun(2500000, 1200000, [](int p) { return p <= 2150000 ? 0.0 : 0.12; });
+    CHECK(pace.lossless && pace.paceKbps == 2500000);
+    pace = paceRun(2500000, 1200000, [](int p) { return p <= 2150000 ? 0.5 : 2.5; });
+    CHECK(pace.lossless && pace.paceKbps <= 2150000 * 0.95 && pace.paceKbps >= 2000000);
+    // Exactly 2% is not under the limit, and bunched loss fails on its own.
+    pace = paceRun(2500000, 1200000, [](int) { return 2.0; });
+    CHECK(!pace.lossless);
+    pace = searchPace(2500000, 1200000, [&](int p) {
+        auto measured = lossy(p, 0.5);
+        measured.worstWindowLossPercent = p > 1800000 ? 6.0 : 1.0;
+        return measured;
+    }, [] { return false; });
+    CHECK(pace.lossless && pace.paceKbps <= 1800000 * 0.95);
+    // Nothing within the limit: choose the least loss, the faster pace on ties.
+    pace = paceRun(2500000, 1200000, [](int p) { return 1.0 + p / 1000000.0; });
+    CHECK(!pace.lossless && pace.paceKbps == 1200000);
+    pace = paceRun(2500000, 1200000, [](int) { return 3.0; });
+    CHECK(!pace.lossless && pace.paceKbps == 2500000);
+    // A frame that needs most of the link keeps the link: the floor never exceeds it.
+    pace = paceRun(1000000, 1500000, [](int) { return 2.5; });
+    CHECK(!pace.lossless && pace.paceKbps == 1000000 && paces.size() == 1);
+    // A lucky single pass is not enough: failed confirmation steps down 10%.
+    int calls = 0;
+    pace = searchPace(2500000, 1200000, [&](int p) {
+        ++calls;
+        return lossy(p, p <= 1800000 || (p <= 2000000 && calls % 2) ? 0.0 : 3.0);
+    }, [] { return false; });
+    CHECK(pace.lossless && pace.paceKbps <= 1800000 && pace.paceKbps >= 1200000);
+    // Cancellation and unusable links determine nothing.
+    bool stopPace = false;
+    pace = searchPace(2500000, 1200000, [&](int p) { stopPace = true; return lossy(p, 0); }, [&] { return stopPace; });
+    CHECK(pace.paceKbps == 0);
+    CHECK(searchPace(10000, 5000, [&](int p) { return lossy(p, 0); }, [] { return false; }).paceKbps == 0);
     std::puts("PyroWave link search, loss, delay and FEC budget tests passed");
 }

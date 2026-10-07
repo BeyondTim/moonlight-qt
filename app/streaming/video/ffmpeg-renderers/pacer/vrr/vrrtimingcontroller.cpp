@@ -1222,6 +1222,15 @@ VrrTimingDecision VrrTimingController::schedule(const PacedFrame& frame,
             }
         }
     }
+    // PyroWave delivers a frame with zero-filled detail rather than waiting
+    // for lost packets. Its lateness is loss, not delivery jitter or slow
+    // work, and more playout delay cannot recover it; it only moves every
+    // later frame. Present it as scheduled, but keep it out of the evidence
+    // that grows the readiness, interval, mean-miss and smoothness buffers.
+    if (frame.lostPackets() != 0) {
+        m_Pending.smoothness.eligible = false;
+        m_Pending.prediction.eligible = false;
+    }
     m_LastDecodeCompleteUs = sourceMappingUs(frame);
     m_HaveLastDecodeComplete = true;
     if (timestampPlayout && metronomeEnabled()) {
