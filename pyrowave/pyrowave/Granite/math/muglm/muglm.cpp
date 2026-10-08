@@ -413,9 +413,7 @@ void transpose_from_affine(mat4 &dst, const vec4 src[3])
 	float32x4x4_t r = { r0, r1, r2, r3 };
 	vst4q_f32(dst[0].data, r);
 #else
-	mat4 m = transpose(src);
-	for (int i = 0; i < 3; i++)
-		dst[i] = m[i];
+	dst = transpose(mat4(src[0], src[1], src[2], vec4(0.0f, 0.0f, 0.0f, 1.0f)));
 #endif
 }
 
