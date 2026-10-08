@@ -18,3 +18,6 @@ CONFIG += warn_off
 include(../globaldefs.pri)
 
 include(pyrowave.pri)
+
+# MSVC ARM64 defines neither; Granite's SIMD paths key on them (clang-cl defines both)
+win32:contains(QT_ARCH, arm64): DEFINES += __ARM_NEON=1 __aarch64__=1
