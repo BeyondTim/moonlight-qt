@@ -18,7 +18,7 @@ win32:!winrt {
 
 # PyroWave codec library (see pyrowave/VENDOR.txt). Must match the condition
 # in app/app.pro. Linux decodes with Vulkan and presents through libplacebo.
-win32:!winrt:contains(QT_ARCH, x86_64):!disable-pyrowave {
+win32:!winrt:if(contains(QT_ARCH, x86_64)|contains(QT_ARCH, arm64)):!disable-pyrowave {
     SUBDIRS += pyrowave
     app.depends += pyrowave
 }

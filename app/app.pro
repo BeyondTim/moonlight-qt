@@ -528,7 +528,7 @@ wayland {
 
 # PyroWave decoding runs on Vulkan. Windows shares D3D11 surfaces; Linux
 # presents the decoded planes through the libplacebo Vulkan renderer.
-win32:!winrt:contains(QT_ARCH, x86_64):!disable-pyrowave {
+win32:!winrt:if(contains(QT_ARCH, x86_64)|contains(QT_ARCH, arm64)):!disable-pyrowave {
     message(PyroWave decoder enabled)
     CONFIG += pyrowave
 }
